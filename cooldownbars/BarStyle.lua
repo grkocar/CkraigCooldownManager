@@ -1,0 +1,22 @@
+-- ============================================================
+-- CkraigCooldownManager :: CooldownBars :: BarStyle
+-- ============================================================
+-- Bar visual styling (implemented in BarCore.lua):
+--
+--   CkraigCooldownManager:StyleBar(barFrame)
+--     Master styling function (texture, backdrop, border, fonts,
+--     icon cropping, pixel borders, shadows).  Uses a
+--     _bb_styleVersion cache to skip redundant work.
+--
+--   CkraigCooldownManager:GetClassColor()
+--   CkraigCooldownManager:GetBarColor()
+--     Colour helpers for class-colour vs. custom-colour modes.
+--
+-- Internal helpers (via _barInternals):
+--   HideAllIconBorders(child)
+--   FindIconTexture(container)
+--   FindStackFontString(barFrame)
+--   ApplyStackFontToBar(self, barFrame)
+--   InvalidateBarStyle()
+--   RefreshAllBarIconVisibility()
+-- ============================================================

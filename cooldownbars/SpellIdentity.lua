@@ -1,0 +1,25 @@
+-- ============================================================
+-- CkraigCooldownManager :: CooldownBars :: SpellIdentity
+-- ============================================================
+-- Spell resolution helpers (implemented in BarCore.lua, exposed
+-- via CkraigCooldownManager._barInternals):
+--
+--   NormalizeBarSpellKey(value)
+--     Normalise a spell/cooldown key to a canonical string form.
+--
+--   GetSpellCandidatesFromCooldownInfo(cooldownInfo)
+--     Extract all candidate spellIDs from a CooldownViewer info table.
+--
+--   IsSpellKnownForPlayer(spellID)
+--     Check if the player knows a spell via multiple fallback APIs.
+--
+--   IsCooldownKeyKnownForPlayer(key)
+--     Check if a cooldownID/spellID is known to the player.
+--
+--   ResolveBarSpellIdentity(barFrame, fallbackIndex)
+--     Walk a bar frame's data sources to find its spell key, name, icon.
+--
+--   BuildBarSpellItemsForOptions(settings)
+--     Build a sorted list of {key, label, icon} from visible bars.
+--     Also exposed as CkraigCooldownManager:GetBarSpellItems().
+-- ============================================================

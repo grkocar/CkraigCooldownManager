@@ -1,0 +1,22 @@
+-- ============================================================
+-- CkraigCooldownManager :: CooldownBars :: BarLayout
+-- ============================================================
+-- Bar positioning/layout (implemented in BarCore.lua):
+--
+--   CkraigCooldownManager:RepositionAllBars()
+--     Master layout pass. Handles three modes:
+--       1. Standard — vertical list inside BuffBarCooldownViewer
+--       2. Cluster  — multi-anchor groups with per-cluster
+--          grow direction, bar ordering, vertical/horizontal flow
+--       3. Grid     — N-column grid layout
+--
+--   CkraigCooldownManager:UpdateBarsCooldownPass()
+--     Single merged pass for fade + glow updates (inlined for
+--     zero-allocation per-frame cost).
+--
+-- Cluster ordering helpers (via _barInternals):
+--   GetBarClusterAssignment(settings, key)
+--   BuildOrderedBarsForCluster(settings, clusterIndex, barsByCluster)
+--   AddBarKeyToClusterOrderEnd(settings, clusterIndex, key)
+--   RemoveBarKeyFromAllClusterOrders(settings, key)
+-- ============================================================

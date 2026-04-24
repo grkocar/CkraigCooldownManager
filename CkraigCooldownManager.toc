@@ -1,0 +1,129 @@
+## Interface: 120000,120001,120005
+## Title: CkraigCooldownManager
+## Notes: Professional cooldown manager with centered buff tracking, custom bar colors per spell, cluster mode, charge tracking, trinket/racial tracking, essential & utility cooldown trackers, potion tracking, custom spell tracking, and segment bars.
+## Author: Ckraigfriend
+## Version: 4.0
+## Category: Unit Frames
+## SavedVariables: MyEssentialBuffTrackerDB,MyUtilityBuffTrackerDB,UtilityIconDuplicatorDB,DYNAMICICONSDB,DYNAMICBARSDB,CooldownChargeDB,CkraigCooldownManagerDB,CCM_Settings,TrinketTrackerDB,PowerPotionSuccessIconDB,CCM_TrackedSpellsDB,CCM_SegmentBarsDB,CCM_DefensiveAuraDB,CCM_EditModeTogglePanelDB,CCM_ResourceBarsDB
+
+## OptionalDeps: Ace3, LibStub, CallbackHandler-1.0, LibSharedMedia-3.0, LibCustomGlow-1.0
+
+# ============================================================
+# Libraries  (loaded first — order matters)
+# ============================================================
+Libs/LibStub/LibStub.lua
+Libs/CallbackHandler-1.0/CallbackHandler-1.0.lua
+Libs/AceAddon-3.0/AceAddon-3.0.xml
+Libs/AceConsole-3.0/AceConsole-3.0.xml
+Libs/AceEvent-3.0/AceEvent-3.0.xml
+Libs/AceDB-3.0/AceDB-3.0.xml
+Libs/AceGUI-3.0/AceGUI-3.0.xml
+Libs/AceConfig-3.0/AceConfigRegistry-3.0/AceConfigRegistry-3.0.lua
+Libs/AceConfig-3.0/AceConfigCmd-3.0/AceConfigCmd-3.0.lua
+Libs/AceConfig-3.0/AceConfigDialog-3.0/AceConfigDialog-3.0.lua
+Libs/AceConfig-3.0/AceConfig-3.0.lua
+Libs/AceDBOptions-3.0/AceDBOptions-3.0.lua
+Libs/AceSerializer-3.0/AceSerializer-3.0.lua
+Libs/LibSharedMedia-3.0/LibSharedMedia-3.0/LibSharedMedia-3.0.lua
+Libs/AceGUI-3.0-SharedMediaWidgets/widget.xml
+Libs/LibCustomGlow-1.0/LibCustomGlow-1.0.xml
+Libs/LibDualSpec-1.0/LibDualSpec-1.0.lua
+Libs/LibEditModeOverride/LibEditModeOverride.lua
+Libs/LibEditMode/embed.xml
+
+# ============================================================
+# Core  (addon namespace, saved-variables, bootstrap)
+# ============================================================
+core/Namespace.lua
+core/SavedVariables.lua
+core/Events.lua
+core/Init.lua
+
+# ============================================================
+# Utilities  (shared helpers, constants, profiling)
+# ============================================================
+utils/Constants.lua
+utils/Helpers.lua
+utils/Profiler.lua
+
+# ============================================================
+# Data  (centralised spell/item ID lists)
+# ============================================================
+data/SpellLists.lua
+
+# ============================================================
+# Profiles  (AceDB profile management)
+# ============================================================
+profiles/Defaults.lua
+profiles/ProfileManager.lua
+profiles/ProfileOptions.lua
+
+# ============================================================
+# Trackers :: Buffs
+# ============================================================
+trackers/buffs/EssentialBuffTracker.lua
+trackers/buffs/UtilityBuffTracker.lua
+
+# ============================================================
+# Trackers :: Cooldowns
+# ============================================================
+trackers/cooldowns/DynamicIcons.lua
+cooldownbars/BarCore.lua
+# Documentation stubs (not loaded):
+#   cooldownbars/SpellIdentity.lua
+#   cooldownbars/ClusterAnchors.lua
+#   cooldownbars/BarStyle.lua
+#   cooldownbars/BarLayout.lua
+#   cooldownbars/BarOptions.lua
+trackers/cooldowns/TrackedSpells.lua
+trackers/cooldowns/SegmentBars.lua
+
+# ============================================================
+# Trackers :: Defensive Aura
+# ============================================================
+trackers/buffs/DefensiveAuraTracker.lua
+
+# ============================================================
+# Trackers :: Items
+# ============================================================
+trackers/items/TrinketRacials.lua
+trackers/items/PowerPotionSuccess.lua
+
+# ============================================================
+# Resource Bars  (health, power, class resources)
+# ============================================================
+ResourceBars/ResourceBarsCore.lua
+ResourceBars/HealthBar.lua
+ResourceBars/PowerBar.lua
+ResourceBars/AltPowerBar.lua
+ResourceBars/ClassResources.lua
+ResourceBars/IronfurTracker.lua
+ResourceBars/MonkOrbTracker.lua
+ResourceBars/VengeanceSoulTracker.lua
+ResourceBars/WarriorWhirlwindTracker.lua
+ResourceBars/MaelstromTracker.lua
+
+# ============================================================
+# Visuals  (glow effects)
+# ============================================================
+visuals/GlowManager.lua
+
+# ============================================================
+# UI  (Ace3 options panels, minimap button)
+# ============================================================
+ui/AceOptions.lua
+ui/options/CooldownBarsOptions.lua
+ui/options/DynamicIconsOptions.lua
+ui/options/EssentialBuffsOptions.lua
+ui/options/UtilityBuffsOptions.lua
+ui/options/GlowOptions.lua
+ui/options/TrinketRacialsOptions.lua
+ui/options/PowerPotionOptions.lua
+ui/options/TrackedSpellsOptions.lua
+ui/options/SegmentBarsOptions.lua
+ui/options/ChargeTextColorAceOptions.lua
+ui/options/DefensiveAuraOptions.lua
+ui/options/ResourceBarsOptions.lua
+ui/minimap/MinimapButton.lua
+ui/EditModeTogglePanel.lua
+ui/reload.lua

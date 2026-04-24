@@ -1,0 +1,9 @@
+-- ============================================================
+-- CkraigCooldownManager :: CooldownBars :: BarOptions
+-- ============================================================
+-- Cooldown Bar options are handled by AceConfig in:
+--   ui/options/CooldownBarsOptions.lua
+--
+-- The legacy CreateCkraigBarOptionsPanel() stub is in BarCore.lua
+-- and returns nil (kept for backward compatibility).
+-- ============================================================

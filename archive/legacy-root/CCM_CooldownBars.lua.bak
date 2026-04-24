@@ -1,0 +1,3493 @@
+-- Robustly hides all border textures on an icon frame (child)
+local _bb_childrenPool = {}
+local function _bb_collectChildren(...)
+    wipe(_bb_childrenPool)
+    for i = 1, select("#", ...) do
+        _bb_childrenPool[i] = select(i, ...)
+    end
+    return _bb_childrenPool
+end
+local function SafeGetChildren(container)
+    return _bb_collectChildren(container:GetChildren())
+end
+
+-- Weak-keyed side table for per-bar-frame addon state.
+-- Never write custom Lua properties directly on Blizzard pool frames (causes taint).
+local _bb_barState = setmetatable({}, { __mode = "k" })
+local function GetBarState(bar)
+    local s = _bb_barState[bar]
+    if not s then s = {} _bb_barState[bar] = s end
+    return s
+end
+
+local function HideAllIconBorders(child)
+    if not child then return end
+    -- Try common Blizzard border names
+    if child.DebuffBorder then child.DebuffBorder:SetAlpha(0) end
+    if child.IconBorder then child.IconBorder:SetAlpha(0) end
+    if child.Border then child.Border:SetAlpha(0) end
+    -- Hide any Texture regions that look like borders
+    local regions = {child:GetRegions()}
+    for _, region in ipairs(regions) do
+        if region and region.GetObjectType and region:GetObjectType() == "Texture" then
+            local name = region.GetName and region:GetName() or ""
+            if name and (name:find("Border") or name:find("border")) then
+                region:SetAlpha(0)
+            end
+            -- Also check for typical border texture coordinates (thin, full frame)
+            local l, r, t, b = region:GetTexCoord()
+            if l and r and t and b and (r-l < 0.2 or b-t < 0.2) then
+                region:SetAlpha(0)
+            end
+        end
+    end
+end
+
+local function FindIconTexture(container)
+    if not container then return nil end
+    if container.IsObjectType and container:IsObjectType("Texture") then
+        return container
+    end
+    local direct = container.icon or container.Icon or container.IconTexture or container.Texture
+    if direct and direct.IsObjectType and direct:IsObjectType("Texture") then
+        return direct
+    end
+    if container.GetRegions then
+        for i = 1, select("#", container:GetRegions()) do
+            local region = select(i, container:GetRegions())
+            if region and region.IsObjectType and region:IsObjectType("Texture") then
+                return region
+            end
+        end
+    end
+    if container.GetChildren then
+        for _, child in ipairs({ container:GetChildren() }) do
+            if child and child.GetRegions then
+                for i = 1, select("#", child:GetRegions()) do
+                    local region = select(i, child:GetRegions())
+                    if region and region.IsObjectType and region:IsObjectType("Texture") then
+                        return region
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Helper: Get profile name for current class/spec
+local function GetClassSpecProfileName()
+    local _, class = UnitClass("player")
+    local specIndex = GetSpecialization and GetSpecialization()
+    local specName = specIndex and select(2, GetSpecializationInfo(specIndex)) or "Default"
+    return class .. "_" .. (specName or "Default")
+end
+
+-- Switch to the correct profile for current class/spec if it exists
+local function SwitchProfileForClassSpec(db)
+    if not db or not db.GetCurrentProfile then return end
+    local profileName = GetClassSpecProfileName()
+    if db:GetCurrentProfile() ~= profileName then
+        local profiles = {}
+        db:GetProfiles(profiles)
+        for _, name in ipairs(profiles) do
+            if name == profileName then
+                db:SetProfile(profileName)
+                print("[DEBUG] Profile switched to:", profileName)
+                print("[DEBUG] timerTextAlign after profile switch:", db.profile and db.profile.buffBars and db.profile.buffBars.timerTextAlign)
+                return
+            end
+        end
+    end
+end
+
+-- Event frame to handle spec/profile switching
+local specProfileFrame = CreateFrame("Frame")
+specProfileFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+specProfileFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+specProfileFrame:SetScript("OnEvent", function()
+    if _G.CkraigCooldownManager and _G.CkraigCooldownManager.db then
+        SwitchProfileForClassSpec(_G.CkraigCooldownManager.db)
+    end
+end)
+
+local LCG = LibStub("LibCustomGlow-1.0", true)
+-- Removed unused locals: AceDB, AceDBOptions, LibDualSpec, AceConfig, AceConfigDialog
+local bbGlowColor = {1, 1, 1, 1} -- reusable color array for PixelGlow
+
+
+
+-- (Moved below CkraigCooldownManager definition)
+
+
+
+
+-- Ensure BuffBarCooldownViewer exists for this addon
+if not _G.BuffBarCooldownViewer then
+    local f = CreateFrame("Frame", "BuffBarCooldownViewer", UIParent, "BackdropTemplate")
+    f:SetSize(220, 300)
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        if _G.CkraigCooldownManager and _G.CkraigCooldownManager.SaveBuffBarPosition then
+            _G.CkraigCooldownManager:SaveBuffBarPosition()
+        end
+    end)
+    f:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 8})
+    f:SetBackdropColor(0,0,0,0.3)
+    f:SetBackdropBorderColor(0.2,0.2,0.2,0.8)
+    _G.BuffBarCooldownViewer = f
+
+    -- Add a second blue box for Group 2
+    local group2Box = CreateFrame("Frame", "BuffBarCooldownViewerGroup2", UIParent, "BackdropTemplate")
+    group2Box:SetSize(220, 300)
+    group2Box:SetPoint("CENTER", UIParent, "CENTER", 240, 0) -- Offset to the right of Group 1
+    group2Box:SetMovable(true)
+    group2Box:EnableMouse(true)
+    group2Box:RegisterForDrag("LeftButton")
+    group2Box:SetScript("OnDragStart", group2Box.StartMoving)
+    group2Box:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        -- Save position logic for Group 2 can be added later
+    end)
+    group2Box:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 8})
+    group2Box:SetBackdropColor(0,0.3,0.8,0.3) -- Blue tint for Group 2
+    group2Box:SetBackdropBorderColor(0.2,0.2,0.8,0.8)
+    group2Box:Hide() -- Only show when unlocking icons
+    _G.BuffBarCooldownViewerGroup2 = group2Box
+end
+local AddonName = ...
+local CkraigCooldownManager = LibStub("AceAddon-3.0"):NewAddon(AddonName, "AceEvent-3.0")
+
+local LSM = LibStub("LibSharedMedia-3.0")
+local FADE_THRESHOLD = 0.3
+
+-- Style version system: bumps when settings change so StyleBar can skip redundant work
+local _bb_styleVersion = 0
+local _bb_spellColorVersion = 0
+
+-- Zero-allocation settings change detection (replaces string.format fingerprint)
+local _bb_fp = {}
+local function BarSettingsChanged(settings)
+    local changed = false
+    local v
+    v = settings.font or ""; if _bb_fp[1] ~= v then _bb_fp[1] = v; changed = true end
+    v = settings.texture or ""; if _bb_fp[2] ~= v then _bb_fp[2] = v; changed = true end
+    v = settings.barHeight or 24; if _bb_fp[3] ~= v then _bb_fp[3] = v; changed = true end
+    v = settings.barTextFontSize or 11; if _bb_fp[4] ~= v then _bb_fp[4] = v; changed = true end
+    v = settings.timerTextFontSize or 11; if _bb_fp[5] ~= v then _bb_fp[5] = v; changed = true end
+    v = settings.borderSize or 0; if _bb_fp[6] ~= v then _bb_fp[6] = v; changed = true end
+    v = settings.backdropBorderSize or 0; if _bb_fp[7] ~= v then _bb_fp[7] = v; changed = true end
+    v = settings.barWidth or 200; if _bb_fp[8] ~= v then _bb_fp[8] = v; changed = true end
+    v = settings.useClassColor and true or false; if _bb_fp[9] ~= v then _bb_fp[9] = v; changed = true end
+    v = settings.hideIcons and true or false; if _bb_fp[10] ~= v then _bb_fp[10] = v; changed = true end
+    v = settings.hideBarName and true or false; if _bb_fp[11] ~= v then _bb_fp[11] = v; changed = true end
+    v = settings.timerTextAlign or "RIGHT"; if _bb_fp[12] ~= v then _bb_fp[12] = v; changed = true end
+    v = settings.stackFontSize or 14; if _bb_fp[13] ~= v then _bb_fp[13] = v; changed = true end
+    v = settings.stackFontOffsetX or 0; if _bb_fp[14] ~= v then _bb_fp[14] = v; changed = true end
+    v = settings.stackFontOffsetY or 0; if _bb_fp[15] ~= v then _bb_fp[15] = v; changed = true end
+    v = settings.iconWidth or 24; if _bb_fp[16] ~= v then _bb_fp[16] = v; changed = true end
+    v = settings.iconHeight or 24; if _bb_fp[17] ~= v then _bb_fp[17] = v; changed = true end
+    v = _bb_spellColorVersion; if _bb_fp[18] ~= v then _bb_fp[18] = v; changed = true end
+    return changed
+end
+
+local function InvalidateBarStyle()
+    _bb_styleVersion = _bb_styleVersion + 1
+    wipe(_bb_fp)
+end
+
+-- Pooled tables for RepositionAllBars (avoids GC churn on every cooldown event)
+local _bb_barsByCluster = {}
+local _bb_ordered = {}
+local _bb_added = {}
+local _bb_barByKey = {}
+
+-- Pooled tables for GetBuffBarFrames (avoids 2 table allocations per event dispatch)
+local _bb_frames = {}
+local _bb_active = {}
+
+-- Pooled table for GetSpellCandidatesFromCooldownInfo (avoids per-call allocation)
+local _bb_candidates = {}
+
+-- Local defaults for buffBars (used as fallback if ProfileManager not ready)
+local buffBarsDefaults = {
+    anchorPoint = "CENTER",
+    relativePoint = "CENTER",
+    anchorX = 0,
+    anchorY = 0,
+    enabled = true,
+    font = "Friz Quadrata TT",
+    fontSize = 11,
+    barTextFontSize = 11,
+    stackFontSize = 14,
+    stackFontOffsetX = 0,
+    stackFontOffsetY = 0,
+    stackFontScale = 1.6,
+    texture = "Blizzard Raid Bar",
+    borderSize = 1.0,
+    backdropBorderSize = 1.0,
+    borderColor = {r = 0, g = 0, b = 0, a = 1},
+    barHeight = 24,
+    iconWidth = 24,
+    iconHeight = 24,
+    barWidth = 200,
+    barSpacing = 2,
+    showIcon = true,
+    useClassColor = true,
+    customColor = {r = 0.5, g = 0.5, b = 0.5, a = 1},
+    backdropColor = {r = 0, g = 0, b = 0, a = 0.5},
+    truncateText = false,
+    maxTextWidth = 0,
+    frameStrata = "LOW",
+    barAlpha = 1.0,
+    aspectRatio = "1:1",
+    cornerRadius = 1,
+    hideBarName = false,
+    hideIcons = false,
+    timerTextAlign = "RIGHT",
+    timerTextFontSize = 11, -- separate font size for timer/duration text
+    stackingMode = 1, -- 1 = Dynamic, 2 = ?, 3 = Static Random Up
+    spellColors = {},
+    -- Cluster mode settings
+    clusterMode = false,
+    clusterCount = 3,
+    clusterUnlocked = false,
+    clusterFlow = "vertical",
+    clusterFlows = {},
+    clusterCenterBars = true,
+    clusterAssignments = {},
+    clusterPositions = {},
+    clusterManualOrders = {},
+    clusterBarWidths = {},
+    clusterBarHeights = {},
+    clusterIconPositions = {},  -- per-cluster icon position: "bottom"/"top" for vertical, "left"/"right" for horizontal
+    clusterGrowDirections = {},  -- per-cluster grow direction for vertical: "left" (grow right) or "right" (grow left)
+    clusterLayoutPositions = {},
+    -- Per-spell glow settings: spellGlows[spellKey] = { enabled=bool, mode="show"|"inactive", color={r,g,b,a} }
+    spellGlows = {},
+}
+
+-- OnInitialize: Use ProfileManager's shared database
+local oldOnInitialize = CkraigCooldownManager.OnInitialize
+CkraigCooldownManager.OnInitialize = function(self, ...)
+    if oldOnInitialize then oldOnInitialize(self, ...) end
+    
+    -- Use ProfileManager's shared database instead of creating our own
+    if _G.CkraigProfileManager and _G.CkraigProfileManager.db then
+        self.db = _G.CkraigProfileManager.db
+    end
+    
+    -- Ensure buffBars exists in profile
+    if self.db and self.db.profile then
+        if not self.db.profile.buffBars then
+            self.db.profile.buffBars = CopyTable(buffBarsDefaults)
+        else
+            -- Merge in any missing default values (for new settings added later)
+            for key, value in pairs(buffBarsDefaults) do
+                if self.db.profile.buffBars[key] == nil then
+                    self.db.profile.buffBars[key] = value
+                end
+            end
+        end
+    end
+end
+
+-- Handle profile changes from ProfileManager
+function CkraigCooldownManager:OnProfileChanged()
+    -- Ensure buffBars exists after profile change
+    if self.db and self.db.profile then
+        if not self.db.profile.buffBars then
+            self.db.profile.buffBars = CopyTable(buffBarsDefaults)
+        else
+            -- Merge in any missing default values
+            for key, value in pairs(buffBarsDefaults) do
+                if self.db.profile.buffBars[key] == nil then
+                    self.db.profile.buffBars[key] = value
+                end
+            end
+        end
+    end
+    -- Refresh bars with new profile settings
+    InvalidateBarStyle()
+    if self.RepositionAllBars then
+        self:RepositionAllBars()
+    end
+end
+
+-- Helpers
+local function roundPixel(value) return math.floor((value or 0) + 0.5) end
+
+local function GetBuffBarFrames()
+    wipe(_bb_frames)
+    wipe(_bb_active)
+    if not BuffBarCooldownViewer then return _bb_active end
+
+    if type(BuffBarCooldownViewer.GetItemFrames) == "function" then
+        local ok, items = pcall(BuffBarCooldownViewer.GetItemFrames, BuffBarCooldownViewer)
+        if ok and items and type(items) == "table" then
+            for _, f in ipairs(items) do
+                if f and f:IsObjectType("Frame") then _bb_frames[#_bb_frames + 1] = f end
+            end
+        end
+    end
+
+    if #_bb_frames == 0 and type(BuffBarCooldownViewer.GetChildren) == "function" then
+        local ok, children = pcall(SafeGetChildren, BuffBarCooldownViewer)
+        if ok and children then
+            for _, child in ipairs(children) do
+                if child and child:IsObjectType("Frame") then _bb_frames[#_bb_frames + 1] = child end
+            end
+        end
+    end
+
+    for _, frame in ipairs(_bb_frames) do
+        if frame and frame:IsShown() and frame:IsVisible() then _bb_active[#_bb_active + 1] = frame end
+    end
+    return _bb_active
+end
+
+local function NormalizeBarSpellKey(value)
+    if value == nil then return nil end
+    local valueType = type(value)
+    if valueType == "number" then
+        if value <= 0 then return nil end
+        return tostring(math.floor(value + 0.5))
+    end
+    if valueType == "string" then
+        local trimmed = value:match("^%s*(.-)%s*$")
+        if trimmed == "" then return nil end
+        return trimmed
+    end
+    return nil
+end
+
+local function GetSpellCandidatesFromCooldownInfo(cooldownInfo)
+    wipe(_bb_candidates)
+    if not cooldownInfo then return _bb_candidates end
+
+    local function AddSpell(spellID)
+        if type(spellID) == "number" and spellID > 0 then
+            _bb_candidates[#_bb_candidates + 1] = spellID
+        end
+    end
+
+    AddSpell(cooldownInfo.overrideTooltipSpellID)
+    AddSpell(cooldownInfo.overrideSpellID)
+    AddSpell(cooldownInfo.spellID)
+
+    if type(cooldownInfo.linkedSpellIDs) == "table" then
+        for _, linkedSpellID in ipairs(cooldownInfo.linkedSpellIDs) do
+            AddSpell(linkedSpellID)
+        end
+    end
+
+    return _bb_candidates
+end
+
+local function IsSpellKnownForPlayer(spellID)
+    if not spellID then return false end
+
+    if IsSpellKnownOrOverridesKnown then
+        local okKnown, isKnown = pcall(IsSpellKnownOrOverridesKnown, spellID)
+        if okKnown and isKnown then return true end
+    end
+
+    if IsPlayerSpell then
+        local okPlayerSpell, isPlayerSpell = pcall(IsPlayerSpell, spellID)
+        if okPlayerSpell and isPlayerSpell then return true end
+    end
+
+    if C_SpellBook and C_SpellBook.IsSpellKnown then
+        local okBookKnown, isBookKnown = pcall(C_SpellBook.IsSpellKnown, spellID)
+        if okBookKnown and isBookKnown then return true end
+    end
+
+    return false
+end
+
+local function IsCooldownKeyKnownForPlayer(key)
+    local numericKey = tonumber(key)
+    if not numericKey then return false end
+
+    if C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
+        local okInfo, cooldownInfo = pcall(C_CooldownViewer.GetCooldownViewerCooldownInfo, numericKey)
+        if okInfo and cooldownInfo then
+            if cooldownInfo.isKnown then
+                return true
+            end
+
+            local candidates = GetSpellCandidatesFromCooldownInfo(cooldownInfo)
+            for _, spellID in ipairs(candidates) do
+                if IsSpellKnownForPlayer(spellID) then
+                    return true
+                end
+            end
+        end
+    end
+
+    return IsSpellKnownForPlayer(numericKey)
+end
+
+-- Reusable sources table for ResolveBarSpellIdentity (avoids per-call allocation)
+local _bb_resolveSources = {}
+
+local function ResolveBarSpellIdentity(barFrame, fallbackIndex)
+    if not barFrame then
+        return nil, nil, nil
+    end
+
+    local key = nil
+    local label = nil
+    local icon = nil
+
+    local sources = _bb_resolveSources
+    sources[1] = barFrame
+    sources[2] = barFrame.Bar
+    sources[3] = barFrame.cooldownInfo
+    sources[4] = barFrame.Bar and barFrame.Bar.cooldownInfo
+    sources[5] = nil -- sentinel to stop iteration if table had more entries from last call
+
+    for _, src in ipairs(sources) do
+        if type(src) == "table" then
+            if not key and src.GetCooldownID then
+                local ok, value = pcall(src.GetCooldownID, src)
+                if ok then key = value end
+            end
+            if not key and src.GetSpellID then
+                local ok, value = pcall(src.GetSpellID, src)
+                if ok then key = value end
+            end
+            if not key and src.GetCooldownInfo then
+                local ok, info = pcall(src.GetCooldownInfo, src)
+                if ok and info then
+                    key = info.cooldownID or info.spellID or info.overrideSpellID or info.overrideTooltipSpellID
+                end
+            end
+            if not key then
+                key = src.cooldownID or src.spellID or src.overrideSpellID or src.overrideTooltipSpellID or src.auraSpellID
+            end
+
+            if not label then label = src.spellName or src.name end
+            if not icon then icon = src.icon or src.texture end
+            if key and label and icon then break end
+        end
+    end
+
+    key = NormalizeBarSpellKey(key)
+    if not key then
+        return nil, nil, nil
+    end
+
+    if not IsCooldownKeyKnownForPlayer(key) then
+        return nil, nil, nil
+    end
+
+    local numericKey = tonumber(key)
+
+    if numericKey and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
+        local okInfo, cooldownInfo = pcall(C_CooldownViewer.GetCooldownViewerCooldownInfo, numericKey)
+        if okInfo and cooldownInfo then
+            local candidates = GetSpellCandidatesFromCooldownInfo(cooldownInfo)
+            for _, spellID in ipairs(candidates) do
+                if not label and C_Spell and C_Spell.GetSpellName then
+                    label = C_Spell.GetSpellName(spellID)
+                end
+                if not icon and C_Spell and C_Spell.GetSpellTexture then
+                    icon = C_Spell.GetSpellTexture(spellID)
+                end
+                if label and icon then
+                    break
+                end
+            end
+        end
+    end
+
+    if not label and numericKey and C_Spell and C_Spell.GetSpellName then
+        label = C_Spell.GetSpellName(numericKey)
+    end
+    if not icon and numericKey and C_Spell and C_Spell.GetSpellTexture then
+        icon = C_Spell.GetSpellTexture(numericKey)
+    end
+
+    if not label then
+        label = "Spell " .. key
+    end
+
+    return key, label, icon
+end
+
+local function BuildBarSpellItemsForOptions(settings)
+    settings = settings or (_G.CkraigCooldownManager and _G.CkraigCooldownManager.db and _G.CkraigCooldownManager.db.profile and _G.CkraigCooldownManager.db.profile.buffBars) or {}
+    settings.spellColors = settings.spellColors or {}
+
+    local items = {}
+    local seen = {}
+
+    local function AddItemByKey(rawKey)
+        local key = NormalizeBarSpellKey(rawKey)
+        if not key or seen[key] then return end
+        if not IsCooldownKeyKnownForPlayer(key) then return end
+
+        local label, icon
+        local numericKey = tonumber(key)
+
+        if numericKey and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
+            local okInfo, cooldownInfo = pcall(C_CooldownViewer.GetCooldownViewerCooldownInfo, numericKey)
+            if okInfo and cooldownInfo then
+                local candidates = GetSpellCandidatesFromCooldownInfo(cooldownInfo)
+                for _, spellID in ipairs(candidates) do
+                    if not label and C_Spell and C_Spell.GetSpellName then
+                        label = C_Spell.GetSpellName(spellID)
+                    end
+                    if not icon and C_Spell and C_Spell.GetSpellTexture then
+                        icon = C_Spell.GetSpellTexture(spellID)
+                    end
+                    if label and icon then break end
+                end
+            end
+        end
+
+        if not label and numericKey and C_Spell and C_Spell.GetSpellName then
+            label = C_Spell.GetSpellName(numericKey)
+        end
+        if not icon and numericKey and C_Spell and C_Spell.GetSpellTexture then
+            icon = C_Spell.GetSpellTexture(numericKey)
+        end
+        if not label then label = "Spell " .. tostring(key) end
+
+        seen[key] = true
+        table.insert(items, { key = key, label = label, icon = icon })
+    end
+
+    -- Primary source: C_CooldownViewer API returns ALL bar cooldown IDs (active or not)
+    if C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCategorySet then
+        local okSet, cooldownSet = pcall(C_CooldownViewer.GetCooldownViewerCategorySet, Enum.CooldownViewerCategory.TrackedBar, true)
+        if okSet and cooldownSet then
+            for cooldownID in pairs(cooldownSet) do
+                AddItemByKey(cooldownID)
+            end
+        end
+    end
+
+    -- Secondary source: viewer's own GetCooldownIDs method
+    local viewer = _G["BuffBarCooldownViewer"]
+    if viewer and viewer.GetCooldownIDs then
+        local okIDs, cooldownIDs = pcall(viewer.GetCooldownIDs, viewer)
+        if okIDs and cooldownIDs then
+            for _, cooldownID in ipairs(cooldownIDs) do
+                AddItemByKey(cooldownID)
+            end
+        end
+    end
+
+    -- Tertiary source: currently visible bar frames
+    local bars = GetBuffBarFrames()
+    for i, bar in ipairs(bars) do
+        local key, label, icon = ResolveBarSpellIdentity(bar, i)
+        if key and IsCooldownKeyKnownForPlayer(key) and not seen[key] then
+            seen[key] = true
+            table.insert(items, { key = key, label = label, icon = icon })
+        end
+    end
+
+    table.sort(items, function(a, b)
+        local aNum = tonumber(a.key)
+        local bNum = tonumber(b.key)
+        if aNum and bNum then return aNum < bNum end
+        return tostring(a.key) < tostring(b.key)
+    end)
+
+    return items
+end
+
+-- =========================
+-- Cluster mode helpers
+-- =========================
+local MAX_BAR_CLUSTERS = 10
+local barClusterAnchors = {}
+
+local function GetDefaultBarClusterPosition(index)
+    local spacingX = 220
+    local col = (index - 1) % 3
+    local row = math.floor((index - 1) / 3)
+    return { point = "CENTER", x = -spacingX + col * spacingX, y = 120 - row * 200 }
+end
+
+local function EnsureBarClusterAnchor(settings, index)
+    if barClusterAnchors[index] then
+        return barClusterAnchors[index]
+    end
+
+    local anchor = CreateFrame("Frame", "CkraigBarClusterAnchor" .. index, UIParent, "BackdropTemplate")
+    anchor:SetSize(220, 200)
+    anchor:SetMovable(true)
+    anchor:EnableMouse(true)
+    anchor:RegisterForDrag("LeftButton")
+    anchor:SetClampedToScreen(true)
+    anchor:SetFrameStrata("MEDIUM")
+
+    anchor:SetBackdrop({
+        bgFile = "Interface/Tooltips/UI-Tooltip-Background",
+        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+        edgeSize = 8,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    anchor:SetBackdropColor(0, 0, 0, 0.12)
+    anchor:SetBackdropBorderColor(0.8, 0.6, 0.2, 0.9)
+
+    local label = anchor:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label:SetPoint("TOP", 0, -4)
+    label:SetText("Bar Cluster " .. index)
+    anchor._clusterLabel = label
+    anchor._clusterIndex = index
+    label:Hide()
+
+    -- Manual drag (for "Unlock Clusters" toggle, outside Edit Mode)
+    anchor:SetScript("OnDragStart", function(self)
+        if not settings.clusterUnlocked then return end
+        if InCombatLockdown() then return end
+        self:SetMovable(true)
+        self:StartMoving()
+    end)
+    anchor:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local point, _, relPoint, x, y = self:GetPoint()
+        settings.clusterPositions = settings.clusterPositions or {}
+        settings.clusterPositions[index] = { point = point, relPoint = relPoint, x = x, y = y }
+    end)
+
+    -- Arrow key nudging for pixel-perfect positioning
+    anchor:EnableKeyboard(false)
+    anchor:SetScript("OnKeyDown", function(self, key)
+        if InCombatLockdown() then return end
+        if not settings.clusterUnlocked then
+            self:SetPropagateKeyboardInput(true)
+            return
+        end
+        local step = IsShiftKeyDown() and 10 or 1
+        local point, rel, relPoint, x, y = self:GetPoint()
+        if key == "UP" then
+            y = y + step
+        elseif key == "DOWN" then
+            y = y - step
+        elseif key == "LEFT" then
+            x = x - step
+        elseif key == "RIGHT" then
+            x = x + step
+        elseif key == "ESCAPE" then
+            self:EnableKeyboard(false)
+            self._arrowKeyActive = false
+            self._clusterLabel:SetText("Bar Cluster " .. self._clusterIndex)
+            self:SetPropagateKeyboardInput(true)
+            return
+        else
+            self:SetPropagateKeyboardInput(true)
+            return
+        end
+        self:SetPropagateKeyboardInput(false)
+        self:ClearAllPoints()
+        self:SetPoint(point, UIParent, relPoint, x, y)
+        settings.clusterPositions = settings.clusterPositions or {}
+        settings.clusterPositions[index] = { point = point, relPoint = relPoint, x = x, y = y }
+    end)
+    anchor:SetScript("OnMouseUp", function(self, button)
+        if button == "RightButton" then
+            ShowBarClusterContextMenu(self, settings, index)
+        end
+    end)
+
+    barClusterAnchors[index] = anchor
+
+    -- Restore saved position or use default
+    local saved = settings.clusterPositions and settings.clusterPositions[index]
+    local fallback = GetDefaultBarClusterPosition(index)
+    local point = (saved and saved.point) or fallback.point
+    local x = (saved and saved.x) or fallback.x
+    local y = (saved and saved.y) or fallback.y
+    anchor:ClearAllPoints()
+    anchor:SetPoint(point, UIParent, point, x, y)
+    anchor:Hide()
+
+    return anchor
+end
+
+local function ApplyBarClusterDragState(settings)
+    local clusterCount = settings.clusterCount or 3
+    local unlocked = settings.clusterUnlocked and settings.clusterMode
+    for i = 1, MAX_BAR_CLUSTERS do
+        local anchor = barClusterAnchors[i]
+        if anchor then
+            local inUse = settings.clusterMode and i <= clusterCount
+            if unlocked and inUse then
+                anchor:SetBackdropColor(0.25, 0.18, 0.02, 0.5)
+                anchor:SetBackdropBorderColor(1.0, 0.82, 0.0, 0.9)
+                anchor:EnableMouse(true)
+                anchor._clusterLabel:Show()
+            elseif inUse then
+                anchor:SetBackdropColor(0, 0, 0, 0)
+                anchor:SetBackdropBorderColor(0, 0, 0, 0)
+                anchor:EnableMouse(false)
+                anchor:EnableKeyboard(false)
+                anchor._clusterLabel:Hide()
+            end
+            if not inUse then
+                anchor:Hide()
+            end
+        end
+    end
+end
+
+local function HideAllBarClusterAnchors()
+    for i = 1, MAX_BAR_CLUSTERS do
+        if barClusterAnchors[i] then
+            barClusterAnchors[i]:Hide()
+        end
+    end
+end
+
+
+
+local function GetBarClusterAssignment(settings, key)
+    if not key or not settings.clusterAssignments then return 1 end
+    local assigned = tonumber(settings.clusterAssignments[tostring(key)])
+    if assigned and assigned >= 1 and assigned <= (settings.clusterCount or 3) then
+        return assigned
+    end
+    return 1
+end
+
+local function GetBarClusterManualOrder(settings, clusterIndex)
+    settings.clusterManualOrders = settings.clusterManualOrders or {}
+    settings.clusterManualOrders[clusterIndex] = settings.clusterManualOrders[clusterIndex] or {}
+    return settings.clusterManualOrders[clusterIndex]
+end
+
+local function RemoveBarKeyFromAllClusterOrders(settings, key)
+    local normalizedKey = tostring(NormalizeBarSpellKey(key))
+    if not normalizedKey then return end
+    settings.clusterManualOrders = settings.clusterManualOrders or {}
+    for _, orderList in pairs(settings.clusterManualOrders) do
+        for i = #orderList, 1, -1 do
+            if tostring(orderList[i]) == normalizedKey then
+                table.remove(orderList, i)
+            end
+        end
+    end
+end
+
+local function AddBarKeyToClusterOrderEnd(settings, clusterIndex, key)
+    local normalizedKey = tostring(NormalizeBarSpellKey(key))
+    if not normalizedKey then return end
+    local orderList = GetBarClusterManualOrder(settings, clusterIndex)
+    for _, existing in ipairs(orderList) do
+        if tostring(existing) == normalizedKey then return end
+    end
+    table.insert(orderList, normalizedKey)
+end
+
+local function BuildOrderedBarsForCluster(settings, clusterIndex, barsByCluster)
+    wipe(_bb_ordered)
+    wipe(_bb_added)
+    wipe(_bb_barByKey)
+    local orderList = GetBarClusterManualOrder(settings, clusterIndex)
+    local barsInCluster = barsByCluster[clusterIndex] or {}
+
+    for _, entry in ipairs(barsInCluster) do
+        if entry.key then _bb_barByKey[tostring(entry.key)] = entry end
+    end
+
+    for _, key in ipairs(orderList) do
+        local keyStr = tostring(key)
+        if _bb_barByKey[keyStr] and not _bb_added[keyStr] then
+            table.insert(_bb_ordered, _bb_barByKey[keyStr])
+            _bb_added[keyStr] = true
+        end
+    end
+
+    for _, entry in ipairs(barsInCluster) do
+        local keyStr = tostring(entry.key)
+        if not _bb_added[keyStr] then
+            table.insert(_bb_ordered, entry)
+            _bb_added[keyStr] = true
+        end
+    end
+
+    return _bb_ordered
+end
+
+-- Right-click context menu for cluster anchors
+local barClusterContextMenu = CreateFrame("Frame", "CkraigBarClusterContextMenu", UIParent, "UIDropDownMenuTemplate")
+
+local function ShowBarClusterContextMenu(anchor, settings, clusterIndex)
+    local menuList = {}
+
+    -- Arrow Key Mode
+    if settings.clusterUnlocked then
+        table.insert(menuList, {
+            text = "Arrow Key Mode",
+            isNotRadio = true,
+            checked = function() return anchor._arrowKeyActive end,
+            func = function()
+                local wasActive = anchor._arrowKeyActive
+                for i = 1, MAX_BAR_CLUSTERS do
+                    local other = barClusterAnchors[i]
+                    if other then
+                        other:EnableKeyboard(false)
+                        other._arrowKeyActive = false
+                        if other._clusterLabel then
+                            other._clusterLabel:SetText("Bar Cluster " .. i)
+                        end
+                    end
+                end
+                if not wasActive then
+                    anchor:EnableKeyboard(true)
+                    anchor._arrowKeyActive = true
+                    anchor._clusterLabel:SetText("Bar Cluster " .. clusterIndex .. " [ARROWS]")
+                end
+            end,
+        })
+        table.insert(menuList, { text = "", isTitle = true, notCheckable = true })
+    end
+
+    table.insert(menuList, { text = "", isTitle = true, notCheckable = true })
+    table.insert(menuList, { text = "Close", notCheckable = true, func = function() CloseDropDownMenus() end })
+
+    EasyMenu(menuList, barClusterContextMenu, "cursor", 0, 0, "MENU")
+end
+
+-- =========================
+-- RefreshAllBarIconVisibility
+-- =========================
+local function RefreshAllBarIconVisibility()
+    if not CkraigCooldownManager or not CkraigCooldownManager.db then return end
+    local cfg = CkraigCooldownManager.db.profile and CkraigCooldownManager.db.profile.buffBars
+    if not cfg then return end
+
+    local showIcons = not cfg.hideIcons
+    local bars = GetBuffBarFrames()
+    for _, bar in ipairs(bars) do
+        local barObj = bar.Bar or bar
+        local parent = barObj and barObj.GetParent and barObj:GetParent() or nil
+        local iconContainer = parent and (parent.Icon or parent.icon or parent.IconTexture)
+        if iconContainer then
+            if showIcons then
+                if iconContainer.IsObjectType and iconContainer:IsObjectType("Texture") then
+                    if iconContainer.Show then iconContainer:Show() end
+                    if iconContainer.SetAlpha then iconContainer:SetAlpha(1) end
+                else
+                    if iconContainer.Show then iconContainer:Show() end
+                    if iconContainer.SetAlpha then iconContainer:SetAlpha(1) end
+                    local childTex = iconContainer.icon or iconContainer.Icon or iconContainer.IconTexture or iconContainer.Texture or FindIconTexture(iconContainer)
+                    if childTex and childTex.Show then
+                        childTex:Show()
+                        if childTex.SetAlpha then childTex:SetAlpha(1) end
+                    end
+                end
+                if iconContainer.DebuffBorder then iconContainer.DebuffBorder:SetAlpha(1) end
+                if iconContainer.IconBorder then iconContainer.IconBorder:SetAlpha(1) end
+                if iconContainer.Border then iconContainer.Border:SetAlpha(1) end
+            else
+                if iconContainer.IsObjectType and iconContainer:IsObjectType("Texture") then
+                    if iconContainer.Hide then iconContainer:Hide() end
+                else
+                    local childTex = iconContainer.icon or iconContainer.Icon or iconContainer.IconTexture or iconContainer.Texture or FindIconTexture(iconContainer)
+                    if childTex and childTex.Hide then childTex:Hide() end
+                end
+                HideAllIconBorders(iconContainer)
+            end
+        end
+
+        if parent and parent.Icon then
+            if showIcons then
+                if parent.Icon.Show then parent.Icon:Show() end
+                if parent.Icon.SetAlpha then parent.Icon:SetAlpha(1) end
+                if parent.Icon.DebuffBorder then parent.Icon.DebuffBorder:SetAlpha(1) end
+                if parent.Icon.IconBorder then parent.Icon.IconBorder:SetAlpha(1) end
+                if parent.Icon.Border then parent.Icon.Border:SetAlpha(1) end
+            else
+                if parent.Icon.Hide then parent.Icon:Hide() end
+                HideAllIconBorders(parent.Icon)
+            end
+        end
+
+        if iconContainer and iconContainer.Applications then
+            iconContainer.Applications:Show()
+        end
+        if parent and parent.Icon and parent.Icon.Applications then
+            parent.Icon.Applications:Show()
+        end
+
+        if not showIcons and parent then HideAllIconBorders(parent) end
+
+        if CkraigCooldownManager.StyleBar and barObj then
+            CkraigCooldownManager:StyleBar(barObj)
+        end
+    end
+
+    if CkraigCooldownManager.RepositionAllBars then
+        CkraigCooldownManager:RepositionAllBars()
+    end
+end
+
+-- (rest of the code continues as before)
+
+-- Color helpers
+function CkraigCooldownManager:GetClassColor()
+    local _, class = UnitClass("player")
+    if class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[class] then
+        local c = RAID_CLASS_COLORS[class]
+        return c.r, c.g, c.b, 1
+    end
+    return 0.5, 0.5, 0.5, 1
+end
+
+function CkraigCooldownManager:GetBarColor()
+    local cfg = self.db.profile.buffBars
+    if cfg.useClassColor then return self:GetClassColor() end
+    local c = cfg.customColor or {r=1,g=1,b=1,a=1}
+    return c.r or 1, c.g or 1, c.b or 1, c.a or 1
+end
+
+-- =========================
+-- Stack-count text helpers
+-- =========================
+
+local function FindStackFontString(barFrame)
+    if not barFrame then return nil end
+
+    local candidates = {
+        barFrame.Count, barFrame.CountText, barFrame.StackCount, barFrame.Stack,
+        barFrame.CountFontString, barFrame.StackFontString, barFrame.Number
+    }
+
+    for _, c in ipairs(candidates) do
+        if c and type(c) == "table" and c.IsObjectType and c:IsObjectType("FontString") then
+            return c
+        end
+    end
+
+    if barFrame.GetRegions then
+        for i = 1, select("#", barFrame:GetRegions()) do
+            local region = select(i, barFrame:GetRegions())
+            if region and region.IsObjectType and region:IsObjectType("FontString") then
+                local ok, txt = pcall(region.GetText, region)
+                txt = ok and txt or ""
+                if txt and #txt <= 6 then return region end
+            end
+        end
+    end
+
+    if barFrame.GetChildren then
+        for _, child in ipairs({barFrame:GetChildren()}) do
+            if child and child.GetRegions then
+                for i = 1, select("#", child:GetRegions()) do
+                    local region = select(i, child:GetRegions())
+                    if region and region.IsObjectType and region:IsObjectType("FontString") then
+                        local ok, txt = pcall(region.GetText, region)
+                        txt = ok and txt or ""
+                        if txt and #txt <= 6 then return region end
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function ApplyStackFontToBar(self, barFrame)
+    if not barFrame then return end
+    local cfg = self.db and self.db.profile and self.db.profile.buffBars
+    if not cfg then return end
+
+    local stackFS = FindStackFontString(barFrame)
+    if not stackFS then return end
+
+
+    local fontPath = LSM:Fetch("font", cfg.font) or STANDARD_TEXT_FONT
+    local barHeight = cfg.barHeight or 24
+    local stackFontSize = math.min(cfg.stackFontSize or 14, barHeight)
+    -- local scale = cfg.stackFontScale or 1.6 -- unused
+
+    local ok, txt = pcall(stackFS.GetText, stackFS)
+    if not ok or not txt then txt = "" end
+
+    -- Only apply stackFontSize if the FontString is attached to the icon (not the duration/cooldown number)
+    local parent = stackFS:GetParent() or barFrame
+    local isIconFont = false
+    if parent and (parent:GetName() or ""):find("Icon") then
+        isIconFont = true
+    end
+    if isIconFont then
+        pcall(stackFS.SetFont, stackFS, fontPath, stackFontSize, "OUTLINE")
+    else
+        -- fallback: use bar text font size for non-icon fontstrings
+        local barTextFontSize = math.min(cfg.barTextFontSize or cfg.fontSize or 11, barHeight)
+        pcall(stackFS.SetFont, stackFS, fontPath, barTextFontSize, "OUTLINE")
+    end
+    pcall(stackFS.SetTextColor, stackFS, 1, 1, 1, 1)
+end
+
+local function UpdateAllStackFonts(self)
+    if not BuffBarCooldownViewer or not self.db or not self.db.profile or not self.db.profile.buffBars.enabled then return end
+    local bars = GetBuffBarFrames()
+    for _, bar in ipairs(bars) do
+        local bf = bar.Bar or bar
+        pcall(ApplyStackFontToBar, self, bf)
+    end
+end
+
+-- =========================
+-- Styling and layout
+-- =========================
+
+function CkraigCooldownManager:StyleBar(barFrame)
+    if not barFrame then return end
+
+    -- Version guard: skip all work when already styled at current version with same inputs
+    local vBar = barFrame._bb_verticalBar
+    local iPos = barFrame._bb_iconPosition
+    local sKey = barFrame._bb_spellKey
+    if barFrame._bb_styleVer == _bb_styleVersion
+        and barFrame._bb_styledVertical == vBar
+        and barFrame._bb_styledIconPos == iPos
+        and barFrame._bb_styledSpellKey == sKey then
+        return
+    end
+
+    local settings = self.db.profile.buffBars
+    local barHeight = settings.barHeight or 24
+    local borderSize = settings.borderSize or 0
+    local backdropBorderSize = settings.backdropBorderSize or 0
+    local borderColor = settings.borderColor or {r=0,g=0,b=0,a=1}
+    local backdropColor = settings.backdropColor or {r=0,g=0,b=0,a=0.5}
+    local fontPath = LSM:Fetch("font", settings.font) or STANDARD_TEXT_FONT
+    local fontSize = settings.barTextFontSize or settings.fontSize or 11
+    local texturePath = LSM:Fetch("statusbar", settings.texture) or "Interface\\RaidFrame\\Raid-Bar-Hp-Fill"
+
+    local parent = barFrame:GetParent()
+    local isVerticalBar = barFrame._bb_verticalBar
+
+    -- Smart StatusBar anchor: tracks layout mode to avoid ClearAllPoints spam
+    if not isVerticalBar then
+        -- Horizontal: anchor StatusBar after the icon so it doesn't cover it
+        local ic = parent and (parent.Icon or parent.icon or parent.IconTexture)
+        local layoutKey = "H:" .. (settings.hideIcons and "noicon" or "icon")
+        if barFrame._bb_barLayoutKey ~= layoutKey and barFrame.ClearAllPoints then
+            barFrame:ClearAllPoints()
+            if ic and not settings.hideIcons then
+                barFrame:SetPoint("LEFT", ic, "RIGHT", 2, 0)
+            else
+                barFrame:SetPoint("LEFT", parent, "LEFT", 0, 0)
+            end
+            barFrame._bb_barLayoutKey = layoutKey
+        end
+        if barFrame.SetHeight then barFrame:SetHeight(barHeight) end
+        if barFrame.SetWidth and settings.barWidth then barFrame:SetWidth(settings.barWidth) end
+        if parent and parent.SetWidth and settings.barWidth then parent:SetWidth(settings.barWidth) end
+    else
+        -- Vertical: StatusBar fills the full parent frame
+        if barFrame._bb_barLayoutKey ~= "V" and barFrame.ClearAllPoints then
+            barFrame:ClearAllPoints()
+            barFrame:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, 0)
+            barFrame:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", 0, 0)
+            barFrame._bb_barLayoutKey = "V"
+        end
+    end
+    -- Do NOT set parent (BuffBarCooldownViewer) height/width here; keep it fixed
+    -- This prevents the Edit Mode box from stretching to fit all bars
+    -- Only the bars themselves should be sized
+
+    if barFrame.SetStatusBarTexture then
+        pcall(barFrame.SetStatusBarTexture, barFrame, texturePath)
+        local r, g, b, a
+        if settings.useClassColor then
+            r, g, b, a = self:GetClassColor()
+        else
+            settings.spellColors = settings.spellColors or {}
+            local spellKey = barFrame._bb_spellKey or (parent and parent._bb_spellKey)
+            local spellColor = spellKey and settings.spellColors[tostring(spellKey)] or nil
+            local color = spellColor or { r = 1, g = 1, b = 1, a = 1 }
+            r = tonumber(color.r) or 1
+            g = tonumber(color.g) or 1
+            b = tonumber(color.b) or 1
+            a = tonumber(color.a) or 1
+        end
+        if barFrame.SetStatusBarColor then pcall(barFrame.SetStatusBarColor, barFrame, r, g, b, a) end
+    end
+
+    if not barFrame._bb_backdrop then
+        barFrame._bb_backdrop = CreateFrame("Frame", nil, barFrame, "BackdropTemplate")
+    end
+    local bg = barFrame._bb_backdrop
+    bg:ClearAllPoints()
+    bg:SetPoint("TOPLEFT", barFrame, -backdropBorderSize, backdropBorderSize)
+    bg:SetPoint("BOTTOMRIGHT", barFrame, backdropBorderSize, -backdropBorderSize)
+    bg:SetFrameLevel(math.max(0, (barFrame:GetFrameLevel() or 0) - 1))
+    bg:SetBackdrop({bgFile="Interface\\Buttons\\WHITE8x8", edgeFile="Interface\\Buttons\\WHITE8x8", edgeSize=backdropBorderSize})
+    bg:SetBackdropColor(backdropColor.r, backdropColor.g, backdropColor.b, backdropColor.a)
+    bg:SetBackdropBorderColor(borderColor.r, borderColor.g, borderColor.b, borderColor.a)
+    bg:Show()
+
+    if parent then
+        if borderSize > 0 then
+            if not parent._bb_outer_border then
+                parent._bb_outer_border = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+            end
+            local outer = parent._bb_outer_border
+            outer:ClearAllPoints()
+            outer:SetPoint("TOPLEFT", parent, -borderSize, borderSize)
+            outer:SetPoint("BOTTOMRIGHT", parent, borderSize, -borderSize)
+            outer:SetFrameLevel(math.max(0, (parent:GetFrameLevel() or 0) - 1))
+            outer:SetBackdrop({edgeFile="Interface\\Buttons\\WHITE8x8", edgeSize=borderSize})
+            outer:SetBackdropColor(0,0,0,0)
+            -- Make the border fully transparent
+            outer:SetBackdropBorderColor(borderColor.r, borderColor.g, borderColor.b, 0)
+            outer:Show()
+        elseif parent._bb_outer_border then
+            parent._bb_outer_border:Hide()
+        end
+    end
+
+    -- Icon handling (LazarUI-style dynamic cropping)
+    local iconContainer = parent and (parent.Icon or parent.icon or parent.IconTexture)
+    if iconContainer then
+        local iconW, iconH
+        if isVerticalBar then
+            -- For vertical bars, make icon square matching the bar's narrow width
+            local parentW = parent:GetWidth() or barHeight
+            iconW = parentW
+            iconH = parentW
+        else
+            iconW = math.min(settings.iconWidth or settings.barHeight or 24, barHeight)
+            iconH = math.min(settings.iconHeight or settings.barHeight or 24, barHeight)
+        end
+        local showIcon = not settings.hideIcons
+
+        -- Reposition the icon based on per-bar icon position (smart anchor to avoid spam)
+        local iconPos = barFrame._bb_iconPosition or (isVerticalBar and "bottom" or "left")
+        local iconAnchorKey = (isVerticalBar and "V:" or "H:") .. iconPos
+        if barFrame._bb_iconAnchorKey ~= iconAnchorKey and iconContainer.ClearAllPoints then
+            iconContainer:ClearAllPoints()
+            if isVerticalBar then
+                if iconPos == "top" then
+                    iconContainer:SetPoint("BOTTOM", parent, "TOP", 0, 1)
+                elseif iconPos == "left" then
+                    iconContainer:SetPoint("RIGHT", parent, "LEFT", -1, 0)
+                else
+                    iconContainer:SetPoint("TOP", parent, "BOTTOM", 0, -1)
+                end
+            else
+                iconContainer:SetPoint("LEFT", parent, "LEFT", 0, 0)
+            end
+            barFrame._bb_iconAnchorKey = iconAnchorKey
+        end
+
+        -- Set the size of the icon container
+        if iconContainer.SetSize then iconContainer:SetSize(iconW, iconH) end
+
+        -- ElvUI-style icon crop
+        local function applyIconCrop(tex)
+            if not tex or not tex.IsObjectType or not tex:IsObjectType("Texture") then return end
+            tex:ClearAllPoints()
+            tex:SetPoint("TOPLEFT", iconContainer, "TOPLEFT", 0, 0)
+            tex:SetPoint("BOTTOMRIGHT", iconContainer, "BOTTOMRIGHT", 0, 0)
+            tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            if tex.SetSize then pcall(tex.SetSize, tex, iconW, iconH) end
+        end
+
+        if iconContainer:IsObjectType("Texture") then
+            if showIcon then
+                iconContainer:Show()
+                applyIconCrop(iconContainer)
+            else
+                iconContainer:Hide()
+            end
+        else
+            local childTex = iconContainer.icon or iconContainer.Icon or iconContainer.IconTexture or iconContainer.Texture
+            if childTex and childTex:IsObjectType("Texture") then
+                if showIcon then
+                    childTex:Show()
+                    applyIconCrop(childTex)
+                else
+                    childTex:Hide()
+                end
+            end
+        end
+
+        -- Add 1-pixel black border using four overlay textures
+        if not iconContainer.pixelBorders then
+            iconContainer.pixelBorders = {}
+            -- Top
+            local top = iconContainer:CreateTexture(nil, "OVERLAY")
+            top:SetColorTexture(0, 0, 0, 1)
+            top:SetPoint("TOPLEFT", iconContainer, "TOPLEFT", 0, 0)
+            top:SetPoint("TOPRIGHT", iconContainer, "TOPRIGHT", 0, 0)
+            top:SetHeight(1)
+            iconContainer.pixelBorders.top = top
+            -- Bottom
+            local bottom = iconContainer:CreateTexture(nil, "OVERLAY")
+            bottom:SetColorTexture(0, 0, 0, 1)
+            bottom:SetPoint("BOTTOMLEFT", iconContainer, "BOTTOMLEFT", 0, 0)
+            bottom:SetPoint("BOTTOMRIGHT", iconContainer, "BOTTOMRIGHT", 0, 0)
+            bottom:SetHeight(1)
+            iconContainer.pixelBorders.bottom = bottom
+            -- Left
+            local leftB = iconContainer:CreateTexture(nil, "OVERLAY")
+            leftB:SetColorTexture(0, 0, 0, 1)
+            leftB:SetPoint("TOPLEFT", iconContainer, "TOPLEFT", 0, 0)
+            leftB:SetPoint("BOTTOMLEFT", iconContainer, "BOTTOMLEFT", 0, 0)
+            leftB:SetWidth(1)
+            iconContainer.pixelBorders.left = leftB
+            -- Right
+            local rightB = iconContainer:CreateTexture(nil, "OVERLAY")
+            rightB:SetColorTexture(0, 0, 0, 1)
+            rightB:SetPoint("TOPRIGHT", iconContainer, "TOPRIGHT", 0, 0)
+            rightB:SetPoint("BOTTOMRIGHT", iconContainer, "BOTTOMRIGHT", 0, 0)
+            rightB:SetWidth(1)
+            iconContainer.pixelBorders.right = rightB
+        end
+        for _, border in pairs(iconContainer.pixelBorders) do border:Show() end
+
+        -- Add shadow texture if not present
+        if not iconContainer.shadow then
+            local shadow = iconContainer:CreateTexture(nil, "BACKGROUND")
+            shadow:SetTexture("Interface\\BUTTONS\\UI-Quickslot-Depress")
+            shadow:SetAllPoints(iconContainer)
+            shadow:SetVertexColor(0, 0, 0, 0.6)
+            iconContainer.shadow = shadow
+        end
+
+        if iconContainer.Applications then iconContainer.Applications:Show() end
+        if parent and parent.Icon and parent.Icon.Applications then parent.Icon.Applications:Show() end
+        -- If there are multiple icons, ensure they are centered and do not exceed bar height
+        if parent and parent.Icons and type(parent.Icons) == "table" then
+            local totalWidth = 0
+            for _, ic in ipairs(parent.Icons) do
+                if ic.SetSize then ic:SetSize(iconW, iconH) end
+                totalWidth = totalWidth + iconW
+            end
+            -- Center icons horizontally if needed
+            if parent.SetWidth then
+                local barWidth = CkraigCooldownManager and CkraigCooldownManager.db and CkraigCooldownManager.db.profile and CkraigCooldownManager.db.profile.buffBars and CkraigCooldownManager.db.profile.buffBars.barWidth or settings.barWidth or 200
+                parent:SetWidth(barWidth)
+            end
+        end
+        -- Only hide icon borders if icons are hidden
+        if not showIcon then
+            HideAllIconBorders(iconContainer)
+            if parent and parent.Icon then HideAllIconBorders(parent.Icon) end
+            if parent then HideAllIconBorders(parent) end
+        end
+    end
+
+    if barFrame.GetRegions then
+        for i = 1, select("#", barFrame:GetRegions()) do
+            local region = select(i, barFrame:GetRegions())
+            if region and region:IsObjectType("Texture") then
+                local keep = false
+                if barFrame.GetStatusBarTexture and region == barFrame:GetStatusBarTexture() then keep = true end
+                if not keep then pcall(region.SetTexture, region, nil); pcall(region.Hide, region) end
+            end
+        end
+    end
+
+    -- Apply font to Name/Text (the buff name)
+    local nameFS = barFrame.Name or barFrame.Text
+    if nameFS and nameFS.SetFont then
+        if settings.hideBarName or isVerticalBar then
+            nameFS:Hide()
+        else
+            nameFS:Show()
+            pcall(nameFS.SetFont, nameFS, fontPath, fontSize, "OUTLINE")
+            pcall(nameFS.SetTextColor, nameFS,1,1,1,1)
+        end
+    end
+    
+    -- Apply font to timer/duration text
+    -- The timer text uses timerTextFontSize setting
+    local timerFontSize = settings.timerTextFontSize or settings.barTextFontSize or settings.fontSize or 11
+    local timerAlign = settings.timerTextAlign or "RIGHT"
+    
+    -- Try direct properties on barFrame first
+    local timeFS = barFrame.TimeLeft or barFrame.Duration or barFrame.Time or barFrame.Timer
+    
+    -- Also check the parent frame for timer FontString
+    if not timeFS and parent then
+        timeFS = parent.TimeLeft or parent.Duration or parent.Time or parent.Timer
+    end
+    
+    -- Count FontStrings for debug
+    local fontStringCount = 0
+    
+    -- If not found, scan barFrame regions for FontStrings that aren't the name
+    if not timeFS and barFrame.GetRegions then
+        for i = 1, select("#", barFrame:GetRegions()) do
+            local region = select(i, barFrame:GetRegions())
+            if region and region:IsObjectType("FontString") then
+                fontStringCount = fontStringCount + 1
+                if region ~= nameFS then
+                    timeFS = region
+                end
+            end
+        end
+    end
+    
+    -- Also check parent frame regions for timer text
+    if not timeFS and parent and parent.GetRegions then
+        for i = 1, select("#", parent:GetRegions()) do
+            local region = select(i, parent:GetRegions())
+            if region and region:IsObjectType("FontString") then
+                fontStringCount = fontStringCount + 1
+                -- Skip nameFS and look for something that looks like time (numbers, colons, etc)
+                if region ~= nameFS then
+                    local text = region.GetText and region:GetText() or ""
+                    -- Timer text usually contains numbers/colons like "1:30" or "45"
+                    if text:match("%d") or text == "" then
+                        timeFS = region
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Apply timer font settings
+    if timeFS and timeFS.SetFont then
+        pcall(timeFS.SetFont, timeFS, fontPath, timerFontSize, "OUTLINE")
+        timeFS:ClearAllPoints()
+        if isVerticalBar then
+            -- For vertical bars, place timer text at bottom center
+            timeFS:SetPoint("BOTTOM", barFrame, "BOTTOM", 0, 2)
+        elseif timerAlign == "LEFT" then
+            timeFS:SetPoint("LEFT", barFrame, "LEFT", 4, 0)
+        elseif timerAlign == "CENTER" then
+            timeFS:SetPoint("CENTER", barFrame, "CENTER", 0, 0)
+        else
+            timeFS:SetPoint("RIGHT", barFrame, "RIGHT", -4, 0)
+        end
+    end
+
+    if self.ApplyBarFrameSettings then pcall(self.ApplyBarFrameSettings, self, barFrame) end
+
+    -- Only modify the stack/count FontString (no other changes)
+    pcall(ApplyStackFontToBar, self, barFrame)
+
+    -- Always set stack/application font and position if Applications FontString exists
+    if parent and parent.Icon and parent.Icon.Applications and parent.Icon.Applications.SetFont then
+        local fontPath = LSM:Fetch("font", settings.font) or STANDARD_TEXT_FONT
+        local baseSize = math.min(14, barHeight)
+        local mult = settings.stackFontSize and (settings.stackFontSize / 14) or 1.0
+        parent.Icon.Applications:SetFont(fontPath, baseSize * mult, "OUTLINE")
+        parent.Icon.Applications:ClearAllPoints()
+        parent.Icon.Applications:SetPoint("CENTER", parent.Icon, "CENTER", settings.stackFontOffsetX or 0, settings.stackFontOffsetY or 0)
+        parent.Icon.Applications:SetWidth(0)
+        parent.Icon.Applications:Show()
+    end
+    if iconContainer and iconContainer.Applications and iconContainer.Applications.SetFont then
+        local fontPath = LSM:Fetch("font", settings.font) or STANDARD_TEXT_FONT
+        local baseSize = math.min(14, barHeight)
+        local mult = settings.stackFontSize and (settings.stackFontSize / 14) or 1.0
+        iconContainer.Applications:SetFont(fontPath, baseSize * mult, "OUTLINE")
+        iconContainer.Applications:ClearAllPoints()
+        iconContainer.Applications:SetPoint("CENTER", iconContainer, "CENTER", settings.stackFontOffsetX or 0, settings.stackFontOffsetY or 0)
+        iconContainer.Applications:SetWidth(0)
+        iconContainer.Applications:Show()
+    end
+
+    -- Stamp this bar as styled at current version + inputs
+    barFrame._bb_styleVer = _bb_styleVersion
+    barFrame._bb_styledVertical = barFrame._bb_verticalBar
+    barFrame._bb_styledIconPos = barFrame._bb_iconPosition
+    barFrame._bb_styledSpellKey = barFrame._bb_spellKey
+end
+
+function CkraigCooldownManager:RepositionAllBars()
+    if not BuffBarCooldownViewer or not self.db.profile.buffBars.enabled then return end
+    local bars = GetBuffBarFrames()
+    local settings = self.db.profile.buffBars
+    local barHeight, spacing = settings.barHeight or 24, settings.barSpacing or 2
+
+    -- Auto-detect settings changes via direct field comparison → bump style version
+    if BarSettingsChanged(settings) then
+        _bb_styleVersion = _bb_styleVersion + 1
+    end
+
+    -- Hook OnShow on any bar frames we haven't seen yet — defer to dispatch frame
+    for _, bar in ipairs(bars) do
+        if bar and not bar._bb_onShowHooked and bar.HookScript then
+            bar._bb_onShowHooked = true
+            bar:HookScript("OnShow", function()
+                self._bb_updateFrame:Show()
+            end)
+        end
+    end
+
+    -- Ensure cluster settings are initialized
+    settings.clusterAssignments = settings.clusterAssignments or {}
+    settings.clusterPositions = settings.clusterPositions or {}
+    settings.clusterManualOrders = settings.clusterManualOrders or {}
+    settings.clusterFlows = settings.clusterFlows or {}
+    settings.clusterBarWidths = settings.clusterBarWidths or {}
+    settings.clusterBarHeights = settings.clusterBarHeights or {}
+    settings.clusterIconPositions = settings.clusterIconPositions or {}
+    settings.clusterGrowDirections = settings.clusterGrowDirections or {}
+
+    if settings.clusterMode then
+        local clusterCount = settings.clusterCount or 3
+        local barWidth = settings.barWidth or 200
+
+        for i = 1, clusterCount do
+            local anchor = EnsureBarClusterAnchor(settings, i)
+            anchor:Show()
+        end
+
+        ApplyBarClusterDragState(settings)
+
+        for i = 1, clusterCount do
+            if not _bb_barsByCluster[i] then _bb_barsByCluster[i] = {} end
+            wipe(_bb_barsByCluster[i])
+        end
+
+        for i, bar in ipairs(bars) do
+            local barObj = bar.Bar or bar
+            barObj._bb_barIndex = i
+            local spellKey, spellLabel = ResolveBarSpellIdentity(bar, i)
+            barObj._bb_spellKey = spellKey
+            barObj._bb_spellLabel = spellLabel
+            bar._bb_spellKey = spellKey
+            bar._bb_spellLabel = spellLabel
+
+            local clusterIdx = GetBarClusterAssignment(settings, spellKey)
+            local bucket = _bb_barsByCluster[clusterIdx]
+            local n = #bucket + 1
+            if not bucket[n] then bucket[n] = {} end
+            local entry = bucket[n]
+            entry.bar = bar; entry.barObj = barObj; entry.key = spellKey; entry.label = spellLabel; entry.index = i
+        end
+
+        for ci = 1, clusterCount do
+            local anchor = barClusterAnchors[ci]
+            if anchor then
+                local orderedBars = BuildOrderedBarsForCluster(settings, ci, _bb_barsByCluster)
+                local clusterBarWidth = settings.clusterBarWidths[ci] or barWidth
+                local clusterBarHeight = settings.clusterBarHeights[ci] or barHeight
+                local flow = string.lower(tostring(settings.clusterFlows[ci] or settings.clusterFlow or "vertical"))
+
+                if flow == "vertical" then
+                    -- Vertical bars: tall/narrow bars placed side by side
+                    local vertBarWidth = clusterBarHeight  -- use height setting as the narrow dimension
+                    local vertBarHeight = clusterBarWidth  -- use width setting as the tall dimension
+                    local growDir = string.lower(tostring(settings.clusterGrowDirections[ci] or "left"))
+                    local totalWidth = 0
+                    for bi, entry in ipairs(orderedBars) do
+                        local bar = entry.bar
+                        local barObj = entry.barObj
+                        if bar and bar.ClearAllPoints then bar:ClearAllPoints() end
+                        local offset = roundPixel((bi - 1) * (vertBarWidth + spacing))
+
+                        if growDir == "right" then
+                            -- First bar on the right, others grow leftward
+                            if bar.SetPoint then pcall(bar.SetPoint, bar, "BOTTOMRIGHT", anchor, "BOTTOMRIGHT", -(offset + 4), 16) end
+                        else
+                            -- First bar on the left, others grow rightward (default)
+                            if bar.SetPoint then pcall(bar.SetPoint, bar, "BOTTOMLEFT", anchor, "BOTTOMLEFT", offset + 4, 16) end
+                        end
+                        if bar.SetFrameStrata then pcall(bar.SetFrameStrata, bar, "MEDIUM") end
+
+                        barObj._bb_clusterBarHeight = clusterBarHeight
+                        barObj._bb_verticalBar = true
+                        barObj._bb_iconPosition = settings.clusterIconPositions[ci] or "bottom"
+                        if bar.SetWidth then pcall(bar.SetWidth, bar, vertBarWidth) end
+                        if bar.SetHeight then pcall(bar.SetHeight, bar, vertBarHeight) end
+                        if barObj.SetWidth then pcall(barObj.SetWidth, barObj, vertBarWidth) end
+                        if barObj.SetHeight then pcall(barObj.SetHeight, barObj, vertBarHeight) end
+                        if barObj.SetOrientation then pcall(barObj.SetOrientation, barObj, "VERTICAL") end
+                        self:StyleBar(barObj)
+                        bar:Show()
+                        totalWidth = offset + vertBarWidth
+                    end
+
+                    local anchorWidth = math.max(totalWidth + 8, 40)
+                    -- Pin anchor by LEFT or RIGHT edge so bars grow outward
+                    -- Capture edge position from OLD size before resizing
+                    local cx, cy = anchor:GetCenter()
+                    local oldW = anchor:GetWidth() or anchorWidth
+                    if cx and cy then
+                        local edgeX
+                        if growDir == "right" then
+                            edgeX = cx + oldW / 2  -- right edge of old frame
+                        else
+                            edgeX = cx - oldW / 2  -- left edge of old frame
+                        end
+                        anchor:SetSize(anchorWidth, vertBarHeight + 32)
+                        anchor:ClearAllPoints()
+                        if growDir == "right" then
+                            anchor:SetPoint("RIGHT", UIParent, "BOTTOMLEFT", edgeX, cy)
+                        else
+                            anchor:SetPoint("LEFT", UIParent, "BOTTOMLEFT", edgeX, cy)
+                        end
+                    else
+                        anchor:SetSize(anchorWidth, vertBarHeight + 32)
+                    end
+                    anchor:Show()
+                else
+                    -- Horizontal (default): normal horizontal bars stacked vertically
+                    local totalHeight = 0
+                    for bi, entry in ipairs(orderedBars) do
+                        local bar = entry.bar
+                        local barObj = entry.barObj
+                        if bar and bar.ClearAllPoints then bar:ClearAllPoints() end
+                        local y = roundPixel((bi - 1) * (clusterBarHeight + spacing))
+
+                        if bar.SetPoint then pcall(bar.SetPoint, bar, "BOTTOMLEFT", anchor, "BOTTOMLEFT", 4, y + 16) end
+                        if bar.SetFrameStrata then pcall(bar.SetFrameStrata, bar, "MEDIUM") end
+
+                        barObj._bb_clusterBarHeight = clusterBarHeight
+                        barObj._bb_verticalBar = false
+                        barObj._bb_iconPosition = settings.clusterIconPositions[ci] or "left"
+                        self:StyleBar(barObj)
+                        if bar.SetWidth then pcall(bar.SetWidth, bar, clusterBarWidth - 8) end
+                        if bar.SetHeight then pcall(bar.SetHeight, bar, clusterBarHeight) end
+                        if barObj.SetWidth then pcall(barObj.SetWidth, barObj, clusterBarWidth - 8) end
+                        if barObj.SetHeight then pcall(barObj.SetHeight, barObj, clusterBarHeight) end
+                        if barObj.SetOrientation then pcall(barObj.SetOrientation, barObj, "HORIZONTAL") end
+                        bar:Show()
+                        totalHeight = y + clusterBarHeight
+                    end
+
+                    local anchorHeight = math.max(totalHeight + 32, 40)
+                    -- Pin anchor by its BOTTOM edge so bars grow upward and bottom stays fixed
+                    local cx, cy = anchor:GetCenter()
+                    local oldH = anchor:GetHeight() or anchorHeight
+                    if cx and cy then
+                        local bottomY = cy - oldH / 2
+                        anchor:SetSize(clusterBarWidth, anchorHeight)
+                        anchor:ClearAllPoints()
+                        anchor:SetPoint("BOTTOM", UIParent, "BOTTOMLEFT", cx, bottomY)
+                    else
+                        anchor:SetSize(clusterBarWidth, anchorHeight)
+                    end
+                    anchor:Show()
+                end
+            end
+        end
+
+        for i = clusterCount + 1, MAX_BAR_CLUSTERS do
+            if barClusterAnchors[i] then barClusterAnchors[i]:Hide() end
+        end
+    elseif settings.gridMode then
+        HideAllBarClusterAnchors()
+        local gridCols = settings.gridCols or 2
+        local gridRows = settings.gridRows or 12
+        local colWidth = settings.barWidth or 200
+        local rowHeight = barHeight + spacing
+        for i, bar in ipairs(bars) do
+            if bar and bar.ClearAllPoints then bar:ClearAllPoints() end
+            if i <= gridCols * gridRows then
+                local col = ((i - 1) % gridCols)
+                local row = math.floor((i - 1) / gridCols)
+                local x = col * (colWidth + spacing)
+                local y = roundPixel(row * rowHeight)
+                if bar.SetPoint then pcall(bar.SetPoint, bar, "BOTTOMLEFT", BuffBarCooldownViewer, "BOTTOMLEFT", x, y) end
+                local barObj = bar.Bar or bar
+                barObj._bb_barIndex = i
+                local spellKey, spellLabel = ResolveBarSpellIdentity(bar, i)
+                barObj._bb_spellKey = spellKey
+                barObj._bb_spellLabel = spellLabel
+                bar._bb_spellKey = spellKey
+                bar._bb_spellLabel = spellLabel
+                self:StyleBar(barObj)
+                bar:Show()
+            else
+                bar:Hide()
+            end
+        end
+    else
+        -- Standard mode: vertical stack in BuffBarCooldownViewer
+        HideAllBarClusterAnchors()
+
+        local parentHeight = BuffBarCooldownViewer:GetHeight() or 300
+        local maxBars = math.floor((parentHeight + spacing) / (barHeight + spacing))
+
+        for i, bar in ipairs(bars) do
+            if bar and bar.ClearAllPoints then bar:ClearAllPoints() end
+            if i <= maxBars then
+                local y = roundPixel((i - 1) * (barHeight + spacing))
+                if bar.SetPoint then pcall(bar.SetPoint, bar, "BOTTOM", BuffBarCooldownViewer, "BOTTOM", 0, y) end
+                local barObj = bar.Bar or bar
+                barObj._bb_barIndex = i
+                local spellKey, spellLabel = ResolveBarSpellIdentity(bar, i)
+                barObj._bb_spellKey = spellKey
+                barObj._bb_spellLabel = spellLabel
+                bar._bb_spellKey = spellKey
+                bar._bb_spellLabel = spellLabel
+                self:StyleBar(barObj)
+                bar:Show()
+            else
+                bar:Hide()
+            end
+        end
+    end
+end
+
+-- Fade-only check: returns true if any bar is fading or approaching fade
+-- Uses Blizzard's itemFramePool:EnumerateActive() — zero-allocation iterator, no table/pcall
+function CkraigCooldownManager:CheckFadingBars()
+    if not BuffBarCooldownViewer then return false end
+    local pool = BuffBarCooldownViewer.itemFramePool
+    if not pool then return false end
+    local anyActive = false
+    local now = GetTime()
+    for frame in pool:EnumerateActive() do
+        if frame:IsShown() and frame.cooldownInfo and frame.cooldownInfo.duration then
+            local duration, startTime = frame.cooldownInfo.duration, frame.cooldownInfo.startTime
+            if duration and startTime and duration > 0 then
+                local remaining = (startTime + duration) - now
+                if remaining <= FADE_THRESHOLD and remaining > 0 then
+                    frame:SetAlpha(remaining / FADE_THRESHOLD)
+                    frame._bb_fading = true
+                    anyActive = true
+                elseif remaining <= 0 then
+                    frame:SetAlpha(0)
+                    frame:Hide()
+                    frame._bb_fading = false
+                else
+                    if frame._bb_fading then
+                        frame:SetAlpha(1)
+                        frame._bb_fading = false
+                    end
+                    if remaining <= 3.0 then anyActive = true end
+                end
+            end
+        end
+    end
+    return anyActive
+end
+
+-- Glow logic: only runs on event-driven dirty flag
+-- Uses itemFramePool:EnumerateActive() and direct API calls (no pcall/table overhead)
+function CkraigCooldownManager:UpdateBarGlows()
+    if not BuffBarCooldownViewer then return end
+    if not LCG then return end
+    local pool = BuffBarCooldownViewer.itemFramePool
+    if not pool then return end
+    local settings = self.db and self.db.profile and self.db.profile.buffBars
+    local spellGlows = settings and settings.spellGlows or {}
+    if not next(spellGlows) then return end
+
+    for frame in pool:EnumerateActive() do
+        local spellKey = frame._bb_spellKey or (frame.Bar and frame.Bar._bb_spellKey)
+        local glowTarget = frame.Bar or frame
+        if spellKey then
+            local glowCfg = spellGlows[tostring(spellKey)]
+            if glowCfg and glowCfg.enabled and not frame.auraDataUnit then
+                local active = false
+                local ci = frame.cooldownInfo
+                if ci and ci.duration and ci.startTime and ci.duration > 0 then
+                    active = (ci.startTime + ci.duration) > GetTime()
+                end
+                local shouldGlow
+                if glowCfg.mode == "inactive" then
+                    shouldGlow = frame:IsShown() and not active
+                else
+                    shouldGlow = frame:IsShown() and active
+                end
+
+                if shouldGlow then
+                    if not glowTarget._bb_glowing or glowTarget._bb_glowKey ~= spellKey then
+                        local c = glowCfg.color or {r=1,g=1,b=0,a=1}
+                        bbGlowColor[1] = c.r; bbGlowColor[2] = c.g; bbGlowColor[3] = c.b; bbGlowColor[4] = c.a
+                        LCG.PixelGlow_Start(glowTarget, bbGlowColor, 8, 0.25, nil, nil, 0, 0, false, "bbGlow")
+                        glowTarget._bb_glowing = true
+                        glowTarget._bb_glowKey = spellKey
+                    end
+                else
+                    if glowTarget._bb_glowing then
+                        LCG.PixelGlow_Stop(glowTarget, "bbGlow")
+                        glowTarget._bb_glowing = false
+                        glowTarget._bb_glowKey = nil
+                    end
+                end
+            else
+                if glowTarget._bb_glowing then
+                    LCG.PixelGlow_Stop(glowTarget, "bbGlow")
+                    glowTarget._bb_glowing = false
+                    glowTarget._bb_glowKey = nil
+                end
+            end
+        end
+    end
+end
+
+-- Merged single-pass: fade + glow in one iteration (replaces separate CheckFadingBars + UpdateBarGlows on dispatch)
+function CkraigCooldownManager:UpdateBarsCooldownPass()
+    if not BuffBarCooldownViewer then return false end
+    local pool = BuffBarCooldownViewer.itemFramePool
+    if not pool then return false end
+
+    local settings = self.db and self.db.profile and self.db.profile.buffBars
+    local spellGlows = settings and settings.spellGlows or {}
+    local hasGlows = LCG and next(spellGlows) ~= nil
+    local anyFading = false
+    local now = GetTime()
+
+    for frame in pool:EnumerateActive() do
+        -- Fade logic
+        if frame:IsShown() and frame.cooldownInfo and frame.cooldownInfo.duration then
+            local duration, startTime = frame.cooldownInfo.duration, frame.cooldownInfo.startTime
+            if duration and startTime and duration > 0 then
+                local remaining = (startTime + duration) - now
+                if remaining <= FADE_THRESHOLD and remaining > 0 then
+                    frame:SetAlpha(remaining / FADE_THRESHOLD)
+                    frame._bb_fading = true
+                    anyFading = true
+                elseif remaining <= 0 then
+                    frame:SetAlpha(0)
+                    frame:Hide()
+                    frame._bb_fading = false
+                else
+                    if frame._bb_fading then
+                        frame:SetAlpha(1)
+                        frame._bb_fading = false
+                    end
+                    if remaining <= 3.0 then anyFading = true end
+                end
+            end
+        end
+
+        -- Glow logic (inlined, state-guarded to avoid redundant LCG calls)
+        if hasGlows then
+            local spellKey = frame._bb_spellKey or (frame.Bar and frame.Bar._bb_spellKey)
+            local glowTarget = frame.Bar or frame
+            if spellKey then
+                local glowCfg = spellGlows[tostring(spellKey)]
+                if glowCfg and glowCfg.enabled and not frame.auraDataUnit then
+                    local active = false
+                    local ci = frame.cooldownInfo
+                    if ci and ci.duration and ci.startTime and ci.duration > 0 then
+                        active = (ci.startTime + ci.duration) > now
+                    end
+                    local shouldGlow
+                    if glowCfg.mode == "inactive" then
+                        shouldGlow = frame:IsShown() and not active
+                    else
+                        shouldGlow = frame:IsShown() and active
+                    end
+
+                    if shouldGlow then
+                        -- Only call PixelGlow_Start when glow state actually changes
+                        if not glowTarget._bb_glowing or glowTarget._bb_glowKey ~= spellKey then
+                            local c = glowCfg.color or {r=1,g=1,b=0,a=1}
+                            bbGlowColor[1] = c.r; bbGlowColor[2] = c.g; bbGlowColor[3] = c.b; bbGlowColor[4] = c.a
+                            LCG.PixelGlow_Start(glowTarget, bbGlowColor, 8, 0.25, nil, nil, 0, 0, false, "bbGlow")
+                            glowTarget._bb_glowing = true
+                            glowTarget._bb_glowKey = spellKey
+                        end
+                    else
+                        if glowTarget._bb_glowing then
+                            LCG.PixelGlow_Stop(glowTarget, "bbGlow")
+                            glowTarget._bb_glowing = false
+                            glowTarget._bb_glowKey = nil
+                        end
+                    end
+                else
+                    if glowTarget._bb_glowing then
+                        LCG.PixelGlow_Stop(glowTarget, "bbGlow")
+                        glowTarget._bb_glowing = false
+                        glowTarget._bb_glowKey = nil
+                    end
+                end
+            end
+        end
+    end
+
+    return anyFading
+end
+
+
+function CkraigCooldownManager:OnEnable()
+    self:RegisterEvent("PLAYER_LOGIN", function()
+        if BuffBarCooldownViewer then
+            self:RepositionAllBars()
+        end
+
+    end)
+
+    if not self._bb_updateFrame then
+        self._bb_updateFrame = CreateFrame("Frame")
+        self._bb_updateFrame._dirty = true
+
+        -- Separate fade frame: only shown when bars are actually fading
+        self._bb_fadeFrame = CreateFrame("Frame")
+        self._bb_fadeFrame:Hide()
+        self._bb_fadeFrame:SetScript("OnUpdate", function(fadeF, elapsed)
+            fadeF._elapsed = (fadeF._elapsed or 0) + elapsed
+            if fadeF._elapsed < 0.5 then return end
+            fadeF._elapsed = 0
+            local anyFading = self:CheckFadingBars()
+            if not anyFading then
+                fadeF:Hide() -- nothing fading → sleep (zero CPU)
+            end
+        end)
+
+        -- Event-driven: flag dirty on cooldown/aura/combat changes
+        self._bb_updateFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+        self._bb_updateFrame:RegisterEvent("UNIT_AURA")
+        self._bb_updateFrame:Hide() -- starts hidden; zero CPU until an event fires
+
+        self._bb_updateFrame:SetScript("OnEvent", function(ef, event, arg1)
+            if event == "UNIT_AURA" and arg1 ~= "player" then return end
+            -- Skip if no spells assigned
+            local pool = BuffBarCooldownViewer and BuffBarCooldownViewer.itemFramePool
+            if pool and pool:GetNumActive() == 0 then return end
+            ef:Show() -- queue one dispatch on next render frame
+        end)
+
+        -- Hook Blizzard bar layout — defer to dispatch frame (avoids 2-3x layout per event)
+        if BuffBarCooldownViewer and BuffBarCooldownViewer.RefreshLayout then
+            hooksecurefunc(BuffBarCooldownViewer, "RefreshLayout", function()
+                self._bb_updateFrame:Show()
+            end)
+        end
+
+        -- Hook the item container's Layout() — defer to dispatch frame instead of
+        -- calling RepositionAllBars directly (prevents duplicate layout per event)
+        if BuffBarCooldownViewer and BuffBarCooldownViewer.GetItemContainerFrame then
+            local container = BuffBarCooldownViewer:GetItemContainerFrame()
+            if container and container.Layout then
+                hooksecurefunc(container, "Layout", function()
+                    self._bb_updateFrame:Show()
+                end)
+            end
+        end
+
+        -- OnShow hooks are applied to bar frames during RepositionAllBars
+        -- (cannot override pool.Acquire — that taints Blizzard's secure pool)
+
+        self._bb_updateFrame._anyFading = false
+
+        -- Fires once per Show(), does work, then hides (sleeps)
+        self._bb_updateFrame:SetScript("OnUpdate", function(frame)
+            frame:Hide()
+            if not (self.db and self.db.profile and self.db.profile.buffBars and self.db.profile.buffBars.enabled) then return end
+
+            -- If no spells assigned to the bar viewer, do nothing
+            if not BuffBarCooldownViewer then return end
+            local pool = BuffBarCooldownViewer.itemFramePool
+            if not pool then return end
+            local count = pool:GetNumActive()
+            if count == 0 then return end
+
+            -- Reposition bars (Blizzard may have repositioned them).
+            -- StyleBar inside RepositionAllBars is version-guarded and skips
+            -- when already styled — so this is cheap on CD/aura events.
+            self:RepositionAllBars()
+
+            -- Single merged pass: fade + glows
+            local anyFading = self:UpdateBarsCooldownPass()
+            if anyFading and self._bb_fadeFrame then
+                self._bb_fadeFrame:Show()
+            end
+        end)
+    end
+
+    SLASH_BETTERBUFFSDEBUG1 = "/bbdebug"
+    SlashCmdList["BETTERBUFFSDEBUG"] = function()
+        local bars = GetBuffBarFrames()
+        if #bars == 0 then print("BetterBuffs: no buff bar frames found") return end
+        local bar = bars[1]
+        print("BetterBuffs: Inspecting frame:", bar:GetName() or "(unnamed)")
+        print("  timerTextFontSize setting:", CkraigCooldownManager.db and CkraigCooldownManager.db.profile and CkraigCooldownManager.db.profile.buffBars and CkraigCooldownManager.db.profile.buffBars.timerTextFontSize or "nil")
+        print("  Direct properties: TimeLeft=", bar.TimeLeft and "YES" or "no", "Duration=", bar.Duration and "YES" or "no", "Name=", bar.Name and "YES" or "no", "Text=", bar.Text and "YES" or "no")
+        if bar.GetRegions then
+            for i = 1, select("#", bar:GetRegions()) do
+                local r = select(i, bar:GetRegions())
+                if r then 
+                    local objType = r.GetObjectType and r:GetObjectType() or "?"
+                    local name = r:GetName() or "(anon)"
+                    local extra = ""
+                    if objType == "FontString" and r.GetText then
+                        extra = " text='" .. (r:GetText() or "") .. "'"
+                    end
+                    print(" region", i, "type", objType, "name", name, extra)
+                end
+            end
+        end
+        if bar.GetChildren then
+            for i, child in ipairs({bar:GetChildren()}) do
+                if child then
+                    print(" child", i, "type", child.GetObjectType and child:GetObjectType() or "?", "name", child:GetName() or "(anon)")
+                    if child.GetRegions then
+                        for j = 1, select("#", child:GetRegions()) do
+                            local r = select(j, child:GetRegions())
+                            if r then print("  child region", j, "type", r.GetObjectType and r:GetObjectType() or "?", "name", r:GetName() or "(anon)") end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+
+-- Options panel for bar settings (CkraigCooldownManager)
+
+
+-- Helper: Attach middle-click input box to a slider
+local function AttachSliderInputBox(slider, minValue, maxValue, onValueSet)
+    local editBox = CreateFrame("EditBox", nil, slider, "BackdropTemplate")
+    editBox:SetAutoFocus(true)
+    editBox:SetFontObject("GameFontHighlight")
+    editBox:SetSize(60, 24)
+    editBox:SetJustifyH("CENTER")
+    editBox:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 8, edgeSize = 8, insets = { left = 2, right = 2, top = 2, bottom = 2 }})
+    editBox:SetBackdropColor(0,0,0,0.8)
+    editBox:Hide()
+    editBox:SetScript("OnEscapePressed", function(self) self:Hide() end)
+    editBox:SetScript("OnEnterPressed", function(self)
+        local val = tonumber(self:GetText())
+        if val then
+            val = math.max(minValue, math.min(maxValue, val))
+            slider:SetValue(val)
+            if onValueSet then onValueSet(val) end
+        end
+        self:Hide()
+    end)
+    editBox:SetScript("OnEditFocusLost", function(self) self:Hide() end)
+    slider:HookScript("OnMouseDown", function(_, btn)
+        if btn == "MiddleButton" then
+            editBox:SetText(tostring(math.floor(slider:GetValue())))
+            editBox:SetPoint("CENTER", slider, "CENTER")
+            editBox:Show()
+            editBox:SetFocus()
+        end
+    end)
+end
+
+function _G.CreateCkraigBarOptionsPanel()
+    -- Guard: return existing panel if already created
+    if _G.CkraigBarOptionsPanel then
+        return _G.CkraigBarOptionsPanel
+    end
+
+    -- Ensure database is ready (use ProfileManager's shared db)
+    if not CkraigCooldownManager.db then
+        if _G.CkraigProfileManager and _G.CkraigProfileManager.db then
+            CkraigCooldownManager.db = _G.CkraigProfileManager.db
+        else
+            print("CkraigCooldownManager: Database not ready, panel creation delayed.")
+            return nil
+        end
+    end
+    if not CkraigCooldownManager.db.profile then
+        print("CkraigCooldownManager: Profile not ready, panel creation delayed.")
+        return nil
+    end
+    if not CkraigCooldownManager.db.profile.buffBars then
+        CkraigCooldownManager.db.profile.buffBars = CopyTable(buffBarsDefaults)
+    end
+
+    -- Create the main panel
+    local panel = CreateFrame("Frame", "CkraigBarOptionsPanel", UIParent)
+    panel.name = "Cooldown Bars"
+
+    -- Create a ScrollFrame and a child content frame
+    local scrollFrame = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
+    scrollFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 0) -- leave room for scrollbar
+
+    local content = CreateFrame("Frame", nil, scrollFrame)
+    content:SetSize(1, 3200) -- will be resized as children are added
+    scrollFrame:SetScrollChild(content)
+
+    -- Now, create all controls on 'content' instead of 'panel'
+    local yOffset = -16
+    local title = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 16, yOffset)
+    title:SetText("Ckraig Cooldown Bar Settings")
+
+    -- Bar Texture (Custom Scrollable Dropdown)
+   -- Grid Mode Checkbox (above Bar Texture)
+local gridModeCheck = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
+gridModeCheck:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 250, -16)
+gridModeCheck.text = gridModeCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+gridModeCheck.text:SetPoint("LEFT", gridModeCheck, "RIGHT", 4, 0)
+gridModeCheck.text:SetText("Enable Grid Mode")
+gridModeCheck:SetChecked(CkraigCooldownManager.db.profile.buffBars.gridMode or false)
+gridModeCheck:SetScript("OnClick", function(self)
+    CkraigCooldownManager.db.profile.buffBars.gridMode = self:GetChecked()
+    if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+end)
+
+-- Grid Columns Input (typeable, right of checkbox)
+local gridColsBox = CreateFrame("EditBox", nil, content, "InputBoxTemplate")
+gridColsBox:SetSize(48, 24)
+gridColsBox:SetPoint("LEFT", gridModeCheck.text, "RIGHT", 12, 0)
+gridColsBox:SetAutoFocus(false)
+gridColsBox:SetNumeric(false)
+gridColsBox:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.gridCols or 2))
+gridColsBox:SetCursorPosition(0)
+gridColsBox:Show()
+local gridColsLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+gridColsLabel:SetPoint("LEFT", gridColsBox, "RIGHT", 4, 0)
+gridColsLabel:SetText("Cols")
+
+gridColsBox:SetScript("OnEnterPressed", function(self)
+    local val = tonumber(self:GetText())
+    if val and val > 0 then
+        CkraigCooldownManager.db.profile.buffBars.gridCols = val
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    else
+        self:SetText(CkraigCooldownManager.db.profile.buffBars.gridCols or "2")
+    end
+    self:ClearFocus()
+end)
+gridColsBox:SetScript("OnEscapePressed", function(self)
+    self:SetText(CkraigCooldownManager.db.profile.buffBars.gridCols or "2")
+    self:ClearFocus()
+end)
+
+-- Grid Rows Input (typeable, right of columns)
+local gridRowsBox = CreateFrame("EditBox", nil, content, "InputBoxTemplate")
+gridRowsBox:SetSize(48, 24)
+gridRowsBox:SetPoint("LEFT", gridColsLabel, "RIGHT", 12, 0)
+gridRowsBox:SetAutoFocus(false)
+gridRowsBox:SetNumeric(false)
+gridRowsBox:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.gridRows or 12))
+gridRowsBox:SetCursorPosition(0)
+gridRowsBox:Show()
+local gridRowsLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+gridRowsLabel:SetPoint("LEFT", gridRowsBox, "RIGHT", 4, 0)
+gridRowsLabel:SetText("Rows")
+
+gridRowsBox:SetScript("OnEnterPressed", function(self)
+    local val = tonumber(self:GetText())
+    if val and val > 0 then
+        CkraigCooldownManager.db.profile.buffBars.gridRows = val
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    else
+        self:SetText(CkraigCooldownManager.db.profile.buffBars.gridRows or "12")
+    end
+    self:ClearFocus()
+end)
+gridRowsBox:SetScript("OnEscapePressed", function(self)
+    self:SetText(CkraigCooldownManager.db.profile.buffBars.gridRows or "12")
+    self:ClearFocus()
+end)
+
+    local texLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    texLabel:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -24)
+    texLabel:SetText("Bar Texture:")
+    texLabel:SetTextColor(0.9,0.9,0.9,1)
+
+    local selectedTexture = CkraigCooldownManager.db.profile.buffBars.texture or "Blizzard Raid Bar"
+
+    local texDropdownButton = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    texDropdownButton:SetPoint("LEFT", texLabel, "RIGHT", 8, 0)
+    texDropdownButton:SetSize(160, 24)
+    texDropdownButton:SetText(selectedTexture)
+
+    local texDropdownFrame = CreateFrame("Frame", nil, content, "BackdropTemplate")
+    texDropdownFrame:SetSize(200, 180)
+    texDropdownFrame:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 8})
+    texDropdownFrame:SetBackdropColor(0,0,0,0.95)
+    texDropdownFrame:SetBackdropBorderColor(0.2,0.2,0.2,0.8)
+    texDropdownFrame:Hide()
+    texDropdownFrame:SetFrameStrata("DIALOG")
+
+    local texScrollFrame = CreateFrame("ScrollFrame", nil, texDropdownFrame, "UIPanelScrollFrameTemplate")
+    texScrollFrame:SetPoint("TOPLEFT", 4, -4)
+    texScrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
+
+    local texScrollChild = CreateFrame("Frame", nil, texScrollFrame)
+    texScrollChild:SetSize(1, 1)
+    texScrollFrame:SetScrollChild(texScrollChild)
+
+    local texLabels = {}
+    local function RefreshTextureDropdown()
+        for _, lbl in ipairs(texLabels) do lbl:Hide() end
+        wipe(texLabels)
+        local textures = LSM and LSM:List("statusbar") or {"Blizzard Raid Bar"}
+        texScrollChild:SetSize(1, #textures * 22)
+        for i, tex in ipairs(textures) do
+            local label = texScrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            label:SetPoint("TOPLEFT", 8, -((i-1)*22))
+            label:SetText(tex)
+            label:SetJustifyH("LEFT")
+            label:SetWidth(160)
+            label:SetHeight(20)
+            label:EnableMouse(true)
+            label:SetScript("OnEnter", function(self)
+                self:SetTextColor(1, 0.82, 0)
+                if not self._highlight then
+                    self._highlight = texScrollChild:CreateTexture(nil, "BACKGROUND")
+                    self._highlight:SetColorTexture(1, 1, 0, 0.15)
+                    self._highlight:SetPoint("TOPLEFT", self, "TOPLEFT", -2, 0)
+                    self._highlight:SetPoint("BOTTOMRIGHT", self, "BOTTOMRIGHT", 2, 0)
+                end
+                self._highlight:Show()
+            end)
+            label:SetScript("OnLeave", function(self)
+                self:SetTextColor(1, 1, 1)
+                if self._highlight then self._highlight:Hide() end
+            end)
+            label:SetScript("OnMouseUp", function(self, btn)
+                if btn == "LeftButton" then
+                    selectedTexture = tex
+                    CkraigCooldownManager.db.profile.buffBars.texture = tex
+                    texDropdownButton:SetText(tex)
+                    texDropdownFrame:Hide()
+                    local bars = GetBuffBarFrames()
+                    for _, bar in ipairs(bars) do
+                        local barObj = bar.Bar or bar
+                        CkraigCooldownManager:StyleBar(barObj)
+                    end
+                end
+            end)
+            texLabels[i] = label
+        end
+    end
+    RefreshTextureDropdown()
+
+    texDropdownButton:SetScript("OnClick", function()
+        if texDropdownFrame:IsShown() then
+            texDropdownFrame:Hide()
+        else
+            RefreshTextureDropdown()
+            texDropdownFrame:ClearAllPoints()
+            texDropdownFrame:SetPoint("TOPLEFT", texDropdownButton, "BOTTOMLEFT", 0, -2)
+            texDropdownFrame:Show()
+        end
+    end)
+
+    if LSM and LSM.RegisterCallback then
+        LSM:RegisterCallback("LibSharedMedia_Registered", function()
+            if texDropdownFrame:IsShown() then
+                RefreshTextureDropdown()
+            end
+        end)
+    end
+
+    -- Hide dropdown if clicking elsewhere
+    texDropdownFrame:SetScript("OnHide", function()
+        texDropdownButton:SetButtonState("NORMAL")
+    end)
+    texDropdownButton:SetScript("OnHide", function()
+        texDropdownFrame:Hide()
+    end)
+
+    -- Bar Height
+    local heightLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    heightLabel:SetPoint("TOPLEFT", texLabel, "BOTTOMLEFT", 0, -36)
+    heightLabel:SetText("Bar Height:")
+    heightLabel:SetTextColor(0.9,0.9,0.9,1)
+    local heightSlider = CreateFrame("Slider", "CkraigBarOptionsPanelHeightSlider", content, "OptionsSliderTemplate")
+    heightSlider:SetPoint("LEFT", heightLabel, "RIGHT", 8, 0)
+    heightSlider:SetMinMaxValues(10, 54)
+    heightSlider:SetValueStep(1)
+    heightSlider:SetObeyStepOnDrag(true)
+    heightSlider:SetWidth(120)
+    heightSlider:SetValue(CkraigCooldownManager.db.profile.buffBars.barHeight or 24)
+    heightSlider:HookScript("OnValueChanged", function(self, value)
+        local v = math.floor(value)
+        CkraigCooldownManager.db.profile.buffBars.barHeight = v
+        CkraigCooldownManager.db.profile.buffBars.iconHeight = v
+        CkraigCooldownManager.db.profile.buffBars.iconWidth = v
+        _G[self:GetName() .. 'Text']:SetText(tostring(v))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+    _G[heightSlider:GetName() .. 'Low']:SetText("10")
+    _G[heightSlider:GetName() .. 'High']:SetText("55")
+    _G[heightSlider:GetName() .. 'Text']:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.barHeight or 24))
+    AttachSliderInputBox(heightSlider, 10, 60, function(val)
+        local v = math.floor(val)
+        CkraigCooldownManager.db.profile.buffBars.barHeight = v
+        CkraigCooldownManager.db.profile.buffBars.iconHeight = v
+        CkraigCooldownManager.db.profile.buffBars.iconWidth = v
+        _G[heightSlider:GetName() .. 'Text']:SetText(tostring(v))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    -- Bar Text Font Size
+    local barTextFontLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    barTextFontLabel:SetPoint("TOPLEFT", heightLabel, "BOTTOMLEFT", 0, -36)
+    barTextFontLabel:SetText("Bar Text Font Size:")
+    barTextFontLabel:SetTextColor(0.9,0.9,0.9,1)
+    local barTextFontSlider = CreateFrame("Slider", "CkraigBarOptionsPanelBarTextFontSlider", content, "OptionsSliderTemplate")
+    barTextFontSlider:SetPoint("LEFT", barTextFontLabel, "RIGHT", 8, 0)
+    barTextFontSlider:SetMinMaxValues(6, 36)
+    barTextFontSlider:SetValueStep(1)
+    barTextFontSlider:SetObeyStepOnDrag(true)
+    barTextFontSlider:SetWidth(120)
+    barTextFontSlider:SetValue(CkraigCooldownManager.db.profile.buffBars.barTextFontSize or 11)
+    barTextFontSlider:HookScript("OnValueChanged", function(self, value)
+        CkraigCooldownManager.db.profile.buffBars.barTextFontSize = math.floor(value)
+        _G[self:GetName() .. 'Text']:SetText(tostring(math.floor(value)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+    _G[barTextFontSlider:GetName() .. 'Low']:SetText("6")
+    _G[barTextFontSlider:GetName() .. 'High']:SetText("36")
+    _G[barTextFontSlider:GetName() .. 'Text']:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.barTextFontSize or 11))
+    AttachSliderInputBox(barTextFontSlider, 6, 36, function(val)
+        CkraigCooldownManager.db.profile.buffBars.barTextFontSize = math.floor(val)
+        _G[barTextFontSlider:GetName() .. 'Text']:SetText(tostring(math.floor(val)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    -- Timer Text Font Size
+    local timerTextFontLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    timerTextFontLabel:SetPoint("TOPLEFT", barTextFontLabel, "BOTTOMLEFT", 0, -36)
+    timerTextFontLabel:SetText("Timer Text Font Size:")
+    timerTextFontLabel:SetTextColor(0.9,0.9,0.9,1)
+    local timerTextFontSlider = CreateFrame("Slider", "CkraigBarOptionsPanelTimerTextFontSlider", content, "OptionsSliderTemplate")
+    timerTextFontSlider:SetPoint("LEFT", timerTextFontLabel, "RIGHT", 8, 0)
+    timerTextFontSlider:SetMinMaxValues(6, 36)
+    timerTextFontSlider:SetValueStep(1)
+    timerTextFontSlider:SetObeyStepOnDrag(true)
+    timerTextFontSlider:SetWidth(120)
+    timerTextFontSlider:SetValue(CkraigCooldownManager.db.profile.buffBars.timerTextFontSize or 11)
+    timerTextFontSlider:HookScript("OnValueChanged", function(self, value)
+        CkraigCooldownManager.db.profile.buffBars.timerTextFontSize = math.floor(value)
+        _G[self:GetName() .. 'Text']:SetText(tostring(math.floor(value)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+    _G[timerTextFontSlider:GetName() .. 'Low']:SetText("6")
+    _G[timerTextFontSlider:GetName() .. 'High']:SetText("36")
+    _G[timerTextFontSlider:GetName() .. 'Text']:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.timerTextFontSize or 11))
+    AttachSliderInputBox(timerTextFontSlider, 6, 36, function(val)
+        CkraigCooldownManager.db.profile.buffBars.timerTextFontSize = math.floor(val)
+        _G[timerTextFontSlider:GetName() .. 'Text']:SetText(tostring(math.floor(val)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    -- Stack/Application Font Size
+    local stackFontLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    stackFontLabel:SetPoint("TOPLEFT", timerTextFontLabel, "BOTTOMLEFT", 0, -36)
+    stackFontLabel:SetText("Stack/Application Font Size:")
+    stackFontLabel:SetTextColor(0.9,0.9,0.9,1)
+    local stackFontSlider = CreateFrame("Slider", "CkraigBarOptionsPanelStackFontSlider", content, "OptionsSliderTemplate")
+    stackFontSlider:SetPoint("LEFT", stackFontLabel, "RIGHT", 8, 0)
+    stackFontSlider:SetMinMaxValues(6, 120)
+    stackFontSlider:SetValueStep(1)
+    stackFontSlider:SetObeyStepOnDrag(true)
+    stackFontSlider:SetWidth(120)
+    stackFontSlider:SetValue(CkraigCooldownManager.db.profile.buffBars.stackFontSize or 14)
+    stackFontSlider:HookScript("OnValueChanged", function(self, value)
+        CkraigCooldownManager.db.profile.buffBars.stackFontSize = math.floor(value)
+        _G[self:GetName() .. 'Text']:SetText(tostring(math.floor(value)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+    _G[stackFontSlider:GetName() .. 'Low']:SetText("6")
+    _G[stackFontSlider:GetName() .. 'High']:SetText("120")
+    _G[stackFontSlider:GetName() .. 'Text']:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.stackFontSize or 14))
+    AttachSliderInputBox(stackFontSlider, 6, 120, function(val)
+        CkraigCooldownManager.db.profile.buffBars.stackFontSize = math.floor(val)
+        _G[stackFontSlider:GetName() .. 'Text']:SetText(tostring(math.floor(val)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    -- Timer Text Alignment Dropdown
+    -- Anchor after Stack/Application Number Y Offset slider
+    local timerAlignLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    timerAlignLabel:SetPoint("TOPLEFT", stackFontSlider, "BOTTOMLEFT", 20, -36)
+    timerAlignLabel:SetText("Timer Text Alignment:")
+    timerAlignLabel:SetTextColor(0.9,0.9,0.9,1)
+
+    local alignments = { "LEFT", "CENTER", "RIGHT" }
+    local function getCurrentAlign()
+        -- Always fetch from the active profile, but guarantee a sane default
+        local align = CkraigCooldownManager.db
+            and CkraigCooldownManager.db:GetCurrentProfile()
+            and CkraigCooldownManager.db.profile
+            and CkraigCooldownManager.db.profile.buffBars
+            and CkraigCooldownManager.db.profile.buffBars.timerTextAlign
+
+        -- Fallback to a safe default if unset or invalid
+        if align ~= "LEFT" and align ~= "CENTER" and align ~= "RIGHT" then
+            align = "RIGHT"
+        end
+
+        return align
+    end
+
+    local function setCurrentAlign(val)
+        if CkraigCooldownManager.db and CkraigCooldownManager.db.profile and CkraigCooldownManager.db.profile.buffBars then
+            CkraigCooldownManager.db.profile.buffBars.timerTextAlign = val
+            if CkraigCooldownManager.db.SaveProfile then
+                CkraigCooldownManager.db:SaveProfile()
+            elseif CkraigCooldownManager.db.Save then
+                CkraigCooldownManager.db:Save()
+            end
+        end
+    end
+
+    local alignDropdownButton = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    alignDropdownButton:SetPoint("LEFT", timerAlignLabel, "RIGHT", 8, 0)
+    alignDropdownButton:SetSize(100, 24)
+    alignDropdownButton:SetText(getCurrentAlign())
+    -- Expose for profile change callback
+    panel.alignDropdownButton = alignDropdownButton
+
+    local alignDropdownFrame = CreateFrame("Frame", nil, content, "BackdropTemplate")
+    alignDropdownFrame:SetSize(120, 80)
+    alignDropdownFrame:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 8})
+    alignDropdownFrame:SetBackdropColor(0,0,0,0.95)
+    alignDropdownFrame:SetBackdropBorderColor(0.2,0.2,0.2,0.8)
+    alignDropdownFrame:Hide()
+    alignDropdownFrame:SetFrameStrata("DIALOG")
+
+    for i, align in ipairs(alignments) do
+        local label = alignDropdownFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        label:SetPoint("TOPLEFT", 8, -((i-1)*22))
+        label:SetText(align)
+        label:SetJustifyH("LEFT")
+        label:SetWidth(100)
+        label:SetHeight(20)
+        label:EnableMouse(true)
+        label:SetScript("OnMouseUp", function(self, btn)
+            if btn == "LeftButton" then
+                setCurrentAlign(align)
+                print("[DEBUG] timerTextAlign set to:", align)
+                alignDropdownButton:SetText(getCurrentAlign())
+                alignDropdownFrame:Hide()
+                if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+                -- Explicitly save AceDB profile for persistence
+                if CkraigCooldownManager.db and CkraigCooldownManager.db.SaveProfile then
+                    CkraigCooldownManager.db:SaveProfile()
+                end
+                if CkraigCooldownManager.db and CkraigCooldownManager.db.Save then
+                    CkraigCooldownManager.db:Save()
+                end
+                print("[DEBUG] timerTextAlign after save:", CkraigCooldownManager.db.profile.buffBars.timerTextAlign)
+                -- Re-apply profile to prevent overwriting
+                if type(SwitchProfileForClassSpec) == "function" and CkraigCooldownManager.db then
+                    SwitchProfileForClassSpec(CkraigCooldownManager.db)
+                    print("[DEBUG] SwitchProfileForClassSpec called after save.")
+                end
+            end
+        end)
+    end
+
+    alignDropdownButton:SetScript("OnClick", function()
+        alignDropdownButton:SetText(getCurrentAlign())
+        if alignDropdownFrame:IsShown() then
+            alignDropdownFrame:Hide()
+        else
+            alignDropdownFrame:ClearAllPoints()
+            alignDropdownFrame:SetPoint("TOPLEFT", alignDropdownButton, "BOTTOMLEFT", 0, -2)
+            alignDropdownFrame:Show()
+        end
+    end)
+
+    -- Always refresh dropdown value when panel is shown
+    panel:HookScript("OnShow", function()
+        alignDropdownButton:SetText(getCurrentAlign())
+    end)
+
+    alignDropdownFrame:SetScript("OnHide", function()
+        alignDropdownButton:SetButtonState("NORMAL")
+    end)
+    alignDropdownButton:SetScript("OnHide", function()
+        alignDropdownFrame:Hide()
+    end)
+
+    -- Bar Width
+    local widthLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    widthLabel:SetPoint("TOPLEFT", stackFontLabel, "BOTTOMLEFT", 0, -36)
+    widthLabel:SetText("Bar Width:")
+    widthLabel:SetTextColor(0.9,0.9,0.9,1)
+    local widthSlider = CreateFrame("Slider", "CkraigBarOptionsPanelWidthSlider", content, "OptionsSliderTemplate")
+    widthSlider:SetPoint("LEFT", widthLabel, "RIGHT", 8, 0)
+    widthSlider:SetMinMaxValues(50, 400)
+    widthSlider:SetValueStep(0.01)
+    widthSlider:SetObeyStepOnDrag(true)
+    widthSlider:SetWidth(120)
+    widthSlider:SetValue(CkraigCooldownManager.db.profile.buffBars.barWidth or 200)
+    widthSlider:HookScript("OnValueChanged", function(self, value)
+        local rounded = tonumber(string.format("%.2f", value))
+        CkraigCooldownManager.db.profile.buffBars.barWidth = rounded
+        _G[self:GetName() .. 'Text']:SetText(string.format("%.2f", rounded))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+    _G[widthSlider:GetName() .. 'Low']:SetText("50")
+    _G[widthSlider:GetName() .. 'High']:SetText("400")
+    _G[widthSlider:GetName() .. 'Text']:SetText(string.format("%.2f", CkraigCooldownManager.db.profile.buffBars.barWidth or 200))
+    AttachSliderInputBox(widthSlider, 50, 400, function(val)
+        local rounded = tonumber(string.format("%.2f", val))
+        CkraigCooldownManager.db.profile.buffBars.barWidth = rounded
+        _G[widthSlider:GetName() .. 'Text']:SetText(string.format("%.2f", rounded))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    -- Bar Spacing
+    local spacingLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    spacingLabel:SetPoint("TOPLEFT", widthLabel, "BOTTOMLEFT", 0, -36)
+    spacingLabel:SetText("Bar Spacing:")
+    spacingLabel:SetTextColor(0.9,0.9,0.9,1)
+    local spacingSlider = CreateFrame("Slider", "CkraigBarOptionsPanelSpacingSlider", content, "OptionsSliderTemplate")
+    spacingSlider:SetPoint("LEFT", spacingLabel, "RIGHT", 8, 0)
+    spacingSlider:SetMinMaxValues(0, 9)
+    spacingSlider:SetValueStep(1)
+    spacingSlider:SetObeyStepOnDrag(true)
+    spacingSlider:SetWidth(120)
+    spacingSlider:SetValue(CkraigCooldownManager.db.profile.buffBars.barSpacing or 2)
+    spacingSlider:HookScript("OnValueChanged", function(self, value)
+        CkraigCooldownManager.db.profile.buffBars.barSpacing = math.floor(value)
+        _G[self:GetName() .. 'Text']:SetText(tostring(math.floor(value)))
+    end)
+    _G[spacingSlider:GetName() .. 'Low']:SetText("0")
+    _G[spacingSlider:GetName() .. 'High']:SetText("9")
+    _G[spacingSlider:GetName() .. 'Text']:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.barSpacing or 2))
+
+    -- Use Class Color Checkbox
+    local classColorCheck = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
+    classColorCheck:SetPoint("TOPLEFT", spacingLabel, "BOTTOMLEFT", -10, 8)
+    classColorCheck.text = classColorCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    classColorCheck.text:SetPoint("LEFT", classColorCheck, "RIGHT", 4, 0)
+    classColorCheck.text:SetText("Use Class Color for Bars")
+    classColorCheck:SetChecked(CkraigCooldownManager.db.profile.buffBars.useClassColor or false)
+    classColorCheck:SetScript("OnClick", function(self)
+        CkraigCooldownManager.db.profile.buffBars.useClassColor = self:GetChecked()
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    -- Per-spell color list
+    local colorLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    colorLabel:SetPoint("TOPLEFT", classColorCheck, "BOTTOMLEFT", 0, -24)
+    colorLabel:SetText("Spell Colors:")
+    colorLabel:SetTextColor(0.9,0.9,0.9,1)
+
+    local spellColorSettings = CkraigCooldownManager.db.profile.buffBars
+    spellColorSettings.spellColors = spellColorSettings.spellColors or {}
+
+    local spellColorArea = CreateFrame("Frame", nil, content)
+    spellColorArea:SetPoint("TOPLEFT", colorLabel, "BOTTOMLEFT", 0, -8)
+    spellColorArea:SetSize(460, 30)
+
+    local refreshSpellColorsButton = CreateFrame("Button", nil, spellColorArea, "UIPanelButtonTemplate")
+    refreshSpellColorsButton:SetSize(160, 20)
+    refreshSpellColorsButton:SetPoint("TOPLEFT", 0, 0)
+    refreshSpellColorsButton:SetText("Refresh Spell List")
+
+    local function OpenSpellColorPicker(swatchButton, spellKey, colorValue)
+        local c = colorValue or { r = 1, g = 1, b = 1 }
+        if ColorPickerFrame and ColorPickerFrame.SetColorRGB then
+            ColorPickerFrame:SetColorRGB(tonumber(c.r) or 1, tonumber(c.g) or 1, tonumber(c.b) or 1)
+        end
+        ColorPickerFrame.hasOpacity = false
+        ColorPickerFrame.previousValues = { tonumber(c.r) or 1, tonumber(c.g) or 1, tonumber(c.b) or 1 }
+
+        local function applyColor()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            spellColorSettings.spellColors[tostring(spellKey)] = { r = r, g = g, b = b }
+            swatchButton:SetBackdropColor(r, g, b, 1)
+            _bb_spellColorVersion = _bb_spellColorVersion + 1
+            if type(CkraigCooldownManager.RepositionAllBars) == "function" then
+                CkraigCooldownManager:RepositionAllBars()
+            end
+        end
+
+        local function cancelColor(prev)
+            if prev then
+                spellColorSettings.spellColors[tostring(spellKey)] = { r = prev[1], g = prev[2], b = prev[3] }
+                swatchButton:SetBackdropColor(prev[1], prev[2], prev[3], 1)
+                _bb_spellColorVersion = _bb_spellColorVersion + 1
+                if type(CkraigCooldownManager.RepositionAllBars) == "function" then
+                    CkraigCooldownManager:RepositionAllBars()
+                end
+            end
+        end
+
+        ColorPickerFrame.func = applyColor
+        ColorPickerFrame.swatchFunc = applyColor
+        ColorPickerFrame.cancelFunc = cancelColor
+        ColorPickerFrame:Show()
+    end
+
+    local function RebuildSpellColorRows()
+        if spellColorArea._rows then
+            for _, row in ipairs(spellColorArea._rows) do
+                if row then
+                    row:Hide()
+                    row:SetParent(nil)
+                end
+            end
+        end
+        spellColorArea._rows = {}
+
+        local items = BuildBarSpellItemsForOptions(spellColorSettings)
+        local startY = -26
+        local rowHeight = 24
+        local maxRows = math.min(#items, 28)
+
+        if maxRows == 0 then
+            local row = CreateFrame("Frame", nil, spellColorArea)
+            row:SetSize(440, rowHeight)
+            row:SetPoint("TOPLEFT", 0, startY)
+            local txt = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            txt:SetPoint("LEFT", 0, 0)
+            txt:SetText("No active spells found. Use Refresh Spell List while bars are visible.")
+            txt:SetTextColor(0.9, 0.6, 0.4, 1)
+            table.insert(spellColorArea._rows, row)
+            spellColorArea:SetHeight(56)
+            return
+        end
+
+        for i = 1, maxRows do
+            local item = items[i]
+            local row = CreateFrame("Frame", nil, spellColorArea)
+            row:SetSize(440, rowHeight)
+            row:SetPoint("TOPLEFT", 0, startY - ((i - 1) * rowHeight))
+            table.insert(spellColorArea._rows, row)
+
+            local icon = row:CreateTexture(nil, "ARTWORK")
+            icon:SetSize(18, 18)
+            icon:SetPoint("LEFT", 0, 0)
+            if item.icon and item.icon ~= "" then
+                icon:SetTexture(item.icon)
+            else
+                icon:SetTexture("Interface\\ICONS\\INV_Misc_QuestionMark")
+            end
+
+            local label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            label:SetPoint("LEFT", icon, "RIGHT", 6, 0)
+            label:SetWidth(250)
+            label:SetJustifyH("LEFT")
+            label:SetText(string.format("%s (%s)", item.label or "Spell", item.key))
+
+            local swatch = CreateFrame("Button", nil, row, "BackdropTemplate")
+            swatch:SetSize(40, 18)
+            swatch:SetPoint("LEFT", label, "RIGHT", 8, 0)
+            swatch:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 8 })
+
+            local existing = spellColorSettings.spellColors[tostring(item.key)]
+            local c = existing or { r = 1, g = 1, b = 1 }
+            swatch:SetBackdropColor(tonumber(c.r) or 1, tonumber(c.g) or 1, tonumber(c.b) or 1, 1)
+            swatch:SetScript("OnClick", function()
+                OpenSpellColorPicker(swatch, item.key, spellColorSettings.spellColors[tostring(item.key)] or c)
+            end)
+
+            local clearBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+            clearBtn:SetSize(48, 18)
+            clearBtn:SetPoint("LEFT", swatch, "RIGHT", 6, 0)
+            clearBtn:SetText("Clear")
+            clearBtn:SetScript("OnClick", function()
+                spellColorSettings.spellColors[tostring(item.key)] = nil
+                swatch:SetBackdropColor(1, 1, 1, 1)
+                if type(CkraigCooldownManager.RepositionAllBars) == "function" then
+                    CkraigCooldownManager:RepositionAllBars()
+                end
+            end)
+
+            local enabled = not (spellColorSettings.useClassColor or false)
+            swatch:EnableMouse(enabled)
+            swatch:SetAlpha(enabled and 1 or 0.4)
+            clearBtn:SetEnabled(enabled)
+        end
+
+        spellColorArea:SetHeight(32 + (maxRows * rowHeight))
+    end
+
+    panel._refreshSpellColorRows = function(self)
+        RebuildSpellColorRows()
+    end
+
+    refreshSpellColorsButton:SetScript("OnClick", function()
+        panel:_refreshSpellColorRows()
+    end)
+
+    classColorCheck:SetScript("OnClick", function(self)
+        CkraigCooldownManager.db.profile.buffBars.useClassColor = self:GetChecked()
+        panel:_refreshSpellColorRows()
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    panel:_refreshSpellColorRows()
+
+    -- Font Dropdown (Custom Scrollable Dropdown)
+    local fontLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    fontLabel:SetPoint("TOPLEFT", spellColorArea, "BOTTOMLEFT", 0, -20)
+    fontLabel:SetText("Bar Text Font:")
+    fontLabel:SetTextColor(0.9,0.9,0.9,1)
+
+
+    local selectedFont = CkraigCooldownManager.db.profile.buffBars.font
+    local fontDropdownButton = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    fontDropdownButton:SetPoint("LEFT", fontLabel, "RIGHT", 8, 0)
+    fontDropdownButton:SetSize(160, 24)
+    fontDropdownButton:SetText(selectedFont or "Friz Quadrata TT")
+
+    local fontDropdownFrame = CreateFrame("Frame", nil, content, "BackdropTemplate")
+    fontDropdownFrame:SetSize(200, 180)
+    fontDropdownFrame:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 8})
+    fontDropdownFrame:SetBackdropColor(0,0,0,0.95)
+    fontDropdownFrame:SetBackdropBorderColor(0.2,0.2,0.2,0.8)
+    fontDropdownFrame:Hide()
+    fontDropdownFrame:SetFrameStrata("DIALOG")
+
+    local fontScrollFrame = CreateFrame("ScrollFrame", nil, fontDropdownFrame, "UIPanelScrollFrameTemplate")
+    fontScrollFrame:SetPoint("TOPLEFT", 4, -4)
+    fontScrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
+
+    local fontScrollChild = CreateFrame("Frame", nil, fontScrollFrame)
+    fontScrollFrame:SetScrollChild(fontScrollChild)
+
+    local function RefreshFontDropdown()
+        local fonts = LSM and LSM:List("font") or {"Friz Quadrata TT"}
+        fontScrollChild:SetSize(1, #fonts * 22)
+        -- Remove old font labels
+        if fontScrollChild._fontLabels then
+            for _, label in ipairs(fontScrollChild._fontLabels) do
+                label:Hide()
+                label:SetParent(nil)
+            end
+        end
+        fontScrollChild._fontLabels = {}
+        for i, font in ipairs(fonts) do
+            local label = fontScrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            label:SetPoint("TOPLEFT", 8, -((i-1)*22))
+            label:SetText(font)
+            label:SetJustifyH("LEFT")
+            label:SetWidth(160)
+            label:SetHeight(20)
+            label:EnableMouse(true)
+            label:SetScript("OnEnter", function(self)
+                self:SetTextColor(1, 0.82, 0)
+                if not self._highlight then
+                    self._highlight = fontScrollChild:CreateTexture(nil, "BACKGROUND")
+                    self._highlight:SetColorTexture(1, 1, 0, 0.15)
+                    self._highlight:SetPoint("TOPLEFT", self, "TOPLEFT", -2, 0)
+                    self._highlight:SetPoint("BOTTOMRIGHT", self, "BOTTOMRIGHT", 2, 0)
+                end
+                self._highlight:Show()
+            end)
+            label:SetScript("OnLeave", function(self)
+                self:SetTextColor(1, 1, 1)
+                if self._highlight then self._highlight:Hide() end
+            end)
+            label:SetScript("OnMouseUp", function(self, btn)
+                if btn == "LeftButton" then
+                    selectedFont = font
+                    CkraigCooldownManager.db.profile.buffBars.font = font
+                    fontDropdownButton:SetText(font)
+                    fontDropdownFrame:Hide()
+                    if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+                end
+            end)
+            fontScrollChild._fontLabels[i] = label
+        end
+    end
+
+    fontDropdownButton:SetScript("OnClick", function()
+        if fontDropdownFrame:IsShown() then
+            fontDropdownFrame:Hide()
+        else
+            RefreshFontDropdown()
+            fontDropdownFrame:ClearAllPoints()
+            fontDropdownFrame:SetPoint("TOPLEFT", fontDropdownButton, "BOTTOMLEFT", 0, -2)
+            fontDropdownFrame:Show()
+        end
+    end)
+
+    fontDropdownFrame:SetScript("OnHide", function()
+        fontDropdownButton:SetButtonState("NORMAL")
+    end)
+    fontDropdownButton:SetScript("OnHide", function()
+        fontDropdownFrame:Hide()
+    end)
+
+    -- Listen for new fonts being registered
+    if LSM and LSM.RegisterCallback then
+        LSM:RegisterCallback("LibSharedMedia_Registered", function()
+            if fontDropdownFrame:IsShown() then
+                RefreshFontDropdown()
+            end
+        end)
+    end
+
+    -- =============================
+    -- Cluster Mode section
+    -- =============================
+    local clusterSettings = CkraigCooldownManager.db.profile.buffBars
+    clusterSettings.clusterAssignments = clusterSettings.clusterAssignments or {}
+    clusterSettings.clusterPositions = clusterSettings.clusterPositions or {}
+    clusterSettings.clusterManualOrders = clusterSettings.clusterManualOrders or {}
+    clusterSettings.clusterFlows = clusterSettings.clusterFlows or {}
+    clusterSettings.clusterBarWidths = clusterSettings.clusterBarWidths or {}
+    clusterSettings.clusterBarHeights = clusterSettings.clusterBarHeights or {}
+    clusterSettings.clusterIconPositions = clusterSettings.clusterIconPositions or {}
+
+    local clusterEnabledCheck = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
+    clusterEnabledCheck:SetPoint("TOPLEFT", fontLabel, "BOTTOMLEFT", 0, -28)
+    clusterEnabledCheck.text = clusterEnabledCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    clusterEnabledCheck.text:SetPoint("LEFT", clusterEnabledCheck, "RIGHT", 4, 0)
+    clusterEnabledCheck.text:SetText("Cluster Mode Enabled")
+    clusterEnabledCheck:SetChecked(clusterSettings.clusterMode or false)
+
+    local RepositionBelowCluster
+
+    local clusterControls = CreateFrame("Frame", nil, content)
+    clusterControls:SetPoint("TOPLEFT", clusterEnabledCheck, "BOTTOMLEFT", 0, -4)
+    clusterControls:SetSize(500, 600)
+
+    local ccY = 0
+
+    -- Unlock clusters checkbox
+    local clusterUnlockCheck = CreateFrame("CheckButton", nil, clusterControls, "UICheckButtonTemplate")
+    clusterUnlockCheck:SetPoint("TOPLEFT", 0, ccY)
+    clusterUnlockCheck.text = clusterUnlockCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    clusterUnlockCheck.text:SetPoint("LEFT", clusterUnlockCheck, "RIGHT", 4, 0)
+    clusterUnlockCheck.text:SetText("Unlock Cluster Boxes (drag to reposition)")
+    clusterUnlockCheck:SetChecked(clusterSettings.clusterUnlocked or false)
+    clusterUnlockCheck:SetScript("OnClick", function(self)
+        clusterSettings.clusterUnlocked = self:GetChecked()
+        ApplyBarClusterDragState(clusterSettings)
+    end)
+    ccY = ccY - 28
+
+    -- Cluster count slider
+    local ccCountLabel = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    ccCountLabel:SetPoint("TOPLEFT", 0, ccY)
+    ccCountLabel:SetText("Cluster Count:")
+    ccCountLabel:SetTextColor(0.9,0.9,0.9,1)
+    local ccCountSlider = CreateFrame("Slider", "CkraigBarClusterCountSlider", clusterControls, "OptionsSliderTemplate")
+    ccCountSlider:SetPoint("LEFT", ccCountLabel, "RIGHT", 8, 0)
+    ccCountSlider:SetMinMaxValues(1, MAX_BAR_CLUSTERS)
+    ccCountSlider:SetValueStep(1)
+    ccCountSlider:SetObeyStepOnDrag(true)
+    ccCountSlider:SetWidth(120)
+    ccCountSlider:SetValue(clusterSettings.clusterCount or 3)
+    _G[ccCountSlider:GetName() .. 'Low']:SetText("1")
+    _G[ccCountSlider:GetName() .. 'High']:SetText(tostring(MAX_BAR_CLUSTERS))
+    _G[ccCountSlider:GetName() .. 'Text']:SetText(tostring(clusterSettings.clusterCount or 3))
+    ccCountSlider:HookScript("OnValueChanged", function(self, value)
+        local v = math.floor(value)
+        clusterSettings.clusterCount = v
+        _G[self:GetName() .. 'Text']:SetText(tostring(v))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+    ccY = ccY - 40
+
+    local clusterDragNote = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    clusterDragNote:SetPoint("TOPLEFT", 4, ccY)
+    clusterDragNote:SetText("Left-drag to move. Right-click a box to enable Arrow Key mode.")
+    clusterDragNote:SetTextColor(0.7, 0.7, 0.7, 1)
+    ccY = ccY - 12
+    local clusterDragNote2 = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    clusterDragNote2:SetPoint("TOPLEFT", 4, ccY)
+    clusterDragNote2:SetText("Shift+Arrow = 10px. Right-click again or Escape to deselect.")
+    clusterDragNote2:SetTextColor(0.7, 0.7, 0.7, 1)
+    ccY = ccY - 16
+
+    -- Per-cluster dimensions
+    local clusterDimHeader = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    clusterDimHeader:SetPoint("TOPLEFT", 0, ccY)
+    clusterDimHeader:SetText("Cluster Dimensions")
+    clusterDimHeader:SetTextColor(1, 0.82, 0, 1)
+    ccY = ccY - 16
+
+    local clusterDimNote = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    clusterDimNote:SetPoint("TOPLEFT", 0, ccY)
+    clusterDimNote:SetText("You can type decimal values (e.g. 24.5) in the input boxes.")
+    clusterDimNote:SetTextColor(0.7, 0.7, 0.7, 1)
+    ccY = ccY - 16
+
+    local clusterDimRows = {}
+
+    local function RebuildClusterDimSliders()
+        for _, row in ipairs(clusterDimRows) do
+            if row.label then row.label:Hide() end
+            if row.wSlider then row.wSlider:Hide() end
+            if row.hSlider then row.hSlider:Hide() end
+            if row.wLabel then row.wLabel:Hide() end
+            if row.hLabel then row.hLabel:Hide() end
+            if row.wInput then row.wInput:Hide() end
+            if row.hInput then row.hInput:Hide() end
+            if row.flowBtn then row.flowBtn:Hide() end
+            if row.iconPosBtn then row.iconPosBtn:Hide() end
+            if row.growBtn then row.growBtn:Hide() end
+        end
+        wipe(clusterDimRows)
+
+        local count = clusterSettings.clusterCount or 3
+        local baseWidth = clusterSettings.barWidth or 200
+        local baseHeight = clusterSettings.barHeight or 24
+        local startY = ccY
+
+        for ci = 1, count do
+            local rowY = startY - ((ci - 1) * 50)
+
+            local lbl = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            lbl:SetPoint("TOPLEFT", 0, rowY)
+            lbl:SetText("Cluster " .. ci .. ":")
+            lbl:SetTextColor(0.9, 0.9, 0.9, 1)
+
+            local wLbl = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            wLbl:SetPoint("LEFT", lbl, "RIGHT", 8, 0)
+            wLbl:SetText("W:")
+            wLbl:SetTextColor(0.7, 0.7, 0.7, 1)
+
+            local wSlider = CreateFrame("Slider", "CkraigBarCluster" .. ci .. "WidthSlider", clusterControls, "OptionsSliderTemplate")
+            wSlider:SetPoint("LEFT", wLbl, "RIGHT", 4, 0)
+            wSlider:SetMinMaxValues(50, 600)
+            wSlider:SetValueStep(1)
+            wSlider:SetObeyStepOnDrag(true)
+            wSlider:SetWidth(100)
+            wSlider:SetValue(clusterSettings.clusterBarWidths[ci] or baseWidth)
+            _G[wSlider:GetName() .. 'Low']:SetText("50")
+            _G[wSlider:GetName() .. 'High']:SetText("600")
+            _G[wSlider:GetName() .. 'Text']:SetText(tostring(clusterSettings.clusterBarWidths[ci] or baseWidth))
+            wSlider._clusterIdx = ci
+
+            local wInput = CreateFrame("EditBox", nil, clusterControls, "BackdropTemplate")
+            wInput:SetAutoFocus(false)
+            wInput:SetFontObject("GameFontHighlight")
+            wInput:SetSize(48, 20)
+            wInput:SetJustifyH("CENTER")
+            wInput:SetPoint("LEFT", wSlider, "RIGHT", 4, 0)
+            wInput:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 8, edgeSize = 8, insets = { left = 2, right = 2, top = 2, bottom = 2 }})
+            wInput:SetBackdropColor(0,0,0,0.8)
+            wInput:SetText(tostring(clusterSettings.clusterBarWidths[ci] or baseWidth))
+            wInput._clusterIdx = ci
+            wInput:SetScript("OnEnterPressed", function(self)
+                local val = tonumber(self:GetText())
+                if val then
+                    val = math.max(50, math.min(600, val))
+                    clusterSettings.clusterBarWidths[self._clusterIdx] = val
+                    local sName = "CkraigBarCluster" .. self._clusterIdx .. "WidthSlider"
+                    if _G[sName] then _G[sName]:SetValue(val) end
+                    if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+                end
+                self:ClearFocus()
+            end)
+            wInput:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+
+            wSlider:HookScript("OnValueChanged", function(self, value)
+                local v = math.floor(value)
+                clusterSettings.clusterBarWidths[self._clusterIdx] = v
+                _G[self:GetName() .. 'Text']:SetText(tostring(v))
+                wInput:SetText(tostring(v))
+                if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+            end)
+
+            local hLbl = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            hLbl:SetPoint("LEFT", wInput, "RIGHT", 12, 0)
+            hLbl:SetText("H:")
+            hLbl:SetTextColor(0.7, 0.7, 0.7, 1)
+
+            local hSlider = CreateFrame("Slider", "CkraigBarCluster" .. ci .. "HeightSlider", clusterControls, "OptionsSliderTemplate")
+            hSlider:SetPoint("LEFT", hLbl, "RIGHT", 4, 0)
+            hSlider:SetMinMaxValues(8, 100)
+            hSlider:SetValueStep(1)
+            hSlider:SetObeyStepOnDrag(true)
+            hSlider:SetWidth(100)
+            hSlider:SetValue(clusterSettings.clusterBarHeights[ci] or baseHeight)
+            _G[hSlider:GetName() .. 'Low']:SetText("8")
+            _G[hSlider:GetName() .. 'High']:SetText("100")
+            _G[hSlider:GetName() .. 'Text']:SetText(tostring(clusterSettings.clusterBarHeights[ci] or baseHeight))
+            hSlider._clusterIdx = ci
+
+            local hInput = CreateFrame("EditBox", nil, clusterControls, "BackdropTemplate")
+            hInput:SetAutoFocus(false)
+            hInput:SetFontObject("GameFontHighlight")
+            hInput:SetSize(48, 20)
+            hInput:SetJustifyH("CENTER")
+            hInput:SetPoint("LEFT", hSlider, "RIGHT", 4, 0)
+            hInput:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 8, edgeSize = 8, insets = { left = 2, right = 2, top = 2, bottom = 2 }})
+            hInput:SetBackdropColor(0,0,0,0.8)
+            hInput:SetText(tostring(clusterSettings.clusterBarHeights[ci] or baseHeight))
+            hInput._clusterIdx = ci
+            hInput:SetScript("OnEnterPressed", function(self)
+                local val = tonumber(self:GetText())
+                if val then
+                    val = math.max(8, math.min(100, val))
+                    clusterSettings.clusterBarHeights[self._clusterIdx] = val
+                    local sName = "CkraigBarCluster" .. self._clusterIdx .. "HeightSlider"
+                    if _G[sName] then _G[sName]:SetValue(val) end
+                    if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+                end
+                self:ClearFocus()
+            end)
+            hInput:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+
+            hSlider:HookScript("OnValueChanged", function(self, value)
+                local v = math.floor(value)
+                clusterSettings.clusterBarHeights[self._clusterIdx] = v
+                _G[self:GetName() .. 'Text']:SetText(tostring(v))
+                hInput:SetText(tostring(v))
+                if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+            end)
+
+            -- Flow direction toggle (Horizontal bars / Vertical bars)
+            clusterSettings.clusterIconPositions = clusterSettings.clusterIconPositions or {}
+            local currentFlow = string.lower(tostring(clusterSettings.clusterFlows[ci] or clusterSettings.clusterFlow or "vertical"))
+            local flowBtn = CreateFrame("Button", nil, clusterControls, "UIPanelButtonTemplate")
+            flowBtn:SetSize(100, 20)
+            flowBtn:SetPoint("TOPLEFT", lbl, "TOPLEFT", 0, -22)
+            flowBtn:SetText(currentFlow == "vertical" and "Vertical Bars" or "Horizontal Bars")
+            flowBtn._clusterIdx = ci
+            flowBtn:SetScript("OnClick", function(self)
+                local idx = self._clusterIdx
+                local cur = string.lower(tostring(clusterSettings.clusterFlows[idx] or clusterSettings.clusterFlow or "vertical"))
+                local newFlow = (cur == "horizontal") and "vertical" or "horizontal"
+                clusterSettings.clusterFlows[idx] = newFlow
+                self:SetText(newFlow == "vertical" and "Vertical Bars" or "Horizontal Bars")
+                -- Reset icon position to default for new flow and update button
+                local defaultPos = (newFlow == "vertical") and "bottom" or "left"
+                clusterSettings.clusterIconPositions[idx] = defaultPos
+                local row = clusterDimRows[idx]
+                if row and row.iconPosBtn then
+                    row.iconPosBtn:SetText("Icon: " .. defaultPos:sub(1,1):upper() .. defaultPos:sub(2))
+                end
+                -- Show/hide grow direction button based on flow
+                if row and row.growBtn then
+                    if newFlow == "vertical" then row.growBtn:Show() else row.growBtn:Hide() end
+                end
+                if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+            end)
+
+            -- Per-cluster icon position toggle (vertical: bottom/top/left, horizontal: left only)
+            local curFlow = string.lower(tostring(clusterSettings.clusterFlows[ci] or clusterSettings.clusterFlow or "vertical"))
+            local curIconPos = string.lower(tostring(clusterSettings.clusterIconPositions[ci] or (curFlow == "vertical" and "bottom" or "left")))
+            local iconPosBtn = CreateFrame("Button", nil, clusterControls, "UIPanelButtonTemplate")
+            iconPosBtn:SetSize(100, 20)
+            iconPosBtn:SetPoint("LEFT", flowBtn, "RIGHT", 6, 0)
+            iconPosBtn._clusterIdx = ci
+            iconPosBtn:SetText("Icon: " .. curIconPos:sub(1,1):upper() .. curIconPos:sub(2))
+            iconPosBtn:SetScript("OnClick", function(self)
+                local idx = self._clusterIdx
+                local flow = string.lower(tostring(clusterSettings.clusterFlows[idx] or clusterSettings.clusterFlow or "vertical"))
+                if flow == "vertical" then
+                    local cur = string.lower(tostring(clusterSettings.clusterIconPositions[idx] or "bottom"))
+                    local newPos
+                    if cur == "bottom" then newPos = "top"
+                    elseif cur == "top" then newPos = "left"
+                    else newPos = "bottom" end
+                    clusterSettings.clusterIconPositions[idx] = newPos
+                    self:SetText("Icon: " .. newPos:sub(1,1):upper() .. newPos:sub(2))
+                end
+                -- horizontal stays "left", no cycling
+                if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+            end)
+
+            -- Per-cluster grow direction toggle (vertical only: first bar left or right)
+            clusterSettings.clusterGrowDirections = clusterSettings.clusterGrowDirections or {}
+            local growLabels = { left = "1st: Left", right = "1st: Right" }
+            local curGrow = string.lower(tostring(clusterSettings.clusterGrowDirections[ci] or "left"))
+            local growBtn = CreateFrame("Button", nil, clusterControls, "UIPanelButtonTemplate")
+            growBtn:SetSize(100, 20)
+            growBtn:SetPoint("LEFT", iconPosBtn, "RIGHT", 6, 0)
+            growBtn._clusterIdx = ci
+            growBtn:SetText(growLabels[curGrow] or growLabels["left"])
+            growBtn:SetScript("OnClick", function(self)
+                local idx = self._clusterIdx
+                local cur = string.lower(tostring(clusterSettings.clusterGrowDirections[idx] or "left"))
+                local newDir = (cur == "left") and "right" or "left"
+                clusterSettings.clusterGrowDirections[idx] = newDir
+                self:SetText(growLabels[newDir] or growLabels["left"])
+                if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+            end)
+            -- Only visible when vertical flow is active
+            if curFlow == "vertical" then growBtn:Show() else growBtn:Hide() end
+
+            clusterDimRows[ci] = { label = lbl, wLabel = wLbl, wSlider = wSlider, wInput = wInput, hLabel = hLbl, hSlider = hSlider, hInput = hInput, flowBtn = flowBtn, iconPosBtn = iconPosBtn, growBtn = growBtn }
+        end
+    end
+
+    RebuildClusterDimSliders()
+
+    -- Spell Assignment section
+    local assignHeader = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    assignHeader:SetText("Assign Spells to Clusters")
+    assignHeader:SetTextColor(1, 0.82, 0, 1)
+
+    local refreshListBtn = CreateFrame("Button", nil, clusterControls, "UIPanelButtonTemplate")
+    refreshListBtn:SetSize(100, 20)
+    refreshListBtn:SetText("Refresh List")
+
+    local assignNote = clusterControls:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    assignNote:SetText("Left-click cluster # to cycle forward. Right-click to cycle back.")
+    assignNote:SetTextColor(0.7, 0.7, 0.7, 1)
+
+    local assignScrollFrame = CreateFrame("ScrollFrame", nil, clusterControls, "UIPanelScrollFrameTemplate")
+    assignScrollFrame:SetSize(480, 300)
+
+    local function RepositionClusterAssignSection()
+        local count = clusterSettings.clusterCount or 3
+        local sectionY = ccY - (count * 50 + 10)
+
+        assignHeader:ClearAllPoints()
+        assignHeader:SetPoint("TOPLEFT", 0, sectionY)
+
+        refreshListBtn:ClearAllPoints()
+        refreshListBtn:SetPoint("LEFT", assignHeader, "RIGHT", 12, 0)
+
+        assignNote:ClearAllPoints()
+        assignNote:SetPoint("TOPLEFT", 0, sectionY - 20)
+
+        assignScrollFrame:ClearAllPoints()
+        assignScrollFrame:SetPoint("TOPLEFT", 0, sectionY - 38)
+
+        local clusterTotalHeight = -(sectionY - 38) + 300 + 10
+        clusterControls:SetHeight(clusterTotalHeight)
+        if RepositionBelowCluster then RepositionBelowCluster() end
+    end
+
+    RepositionClusterAssignSection()
+
+    ccCountSlider:HookScript("OnValueChanged", function()
+        RebuildClusterDimSliders()
+        RepositionClusterAssignSection()
+    end)
+
+    local assignScrollChild = CreateFrame("Frame", nil, assignScrollFrame)
+    assignScrollChild:SetSize(460, 30)
+    assignScrollFrame:SetScrollChild(assignScrollChild)
+
+    local assignRows = {}
+
+    local function RebuildSpellAssignmentRows()
+        for _, row in ipairs(assignRows) do
+            if row.icon then row.icon:Hide() end
+            if row.name then row.name:Hide() end
+            if row.btn then row.btn:Hide() end
+            if row.upBtn then row.upBtn:Hide() end
+            if row.downBtn then row.downBtn:Hide() end
+            if row.glowBtn then row.glowBtn:Hide() end
+            if row.modeBtn then row.modeBtn:Hide() end
+            if row.colorSwatch then row.colorSwatch:Hide() end
+        end
+        wipe(assignRows)
+
+        local spellItems = BuildBarSpellItemsForOptions(clusterSettings)
+        for _, item in ipairs(spellItems) do
+            local k = tostring(item.key)
+            local ci = GetBarClusterAssignment(clusterSettings, k)
+            AddBarKeyToClusterOrderEnd(clusterSettings, ci, k)
+        end
+
+        table.sort(spellItems, function(a, b)
+            local aKey = tostring(a.key)
+            local bKey = tostring(b.key)
+            local aCi = GetBarClusterAssignment(clusterSettings, aKey)
+            local bCi = GetBarClusterAssignment(clusterSettings, bKey)
+            if aCi ~= bCi then return aCi < bCi end
+            local aOrder = GetBarClusterManualOrder(clusterSettings, aCi)
+            local bOrder = GetBarClusterManualOrder(clusterSettings, bCi)
+            local aPos, bPos = #aOrder + 1, #bOrder + 1
+            for i, v in ipairs(aOrder) do if tostring(v) == aKey then aPos = i; break end end
+            for i, v in ipairs(bOrder) do if tostring(v) == bKey then bPos = i; break end end
+            return aPos < bPos
+        end)
+
+        assignScrollChild:SetSize(460, math.max(#spellItems * 48, 30))
+
+        for idx, item in ipairs(spellItems) do
+            local rowY = -((idx - 1) * 48)
+            local key = tostring(item.key)
+
+            local iconTex = assignScrollChild:CreateTexture(nil, "ARTWORK")
+            iconTex:SetSize(20, 20)
+            iconTex:SetPoint("TOPLEFT", 0, rowY)
+            if item.icon then
+                iconTex:SetTexture(item.icon)
+            else
+                iconTex:SetTexture("Interface\\ICONS\\INV_Misc_QuestionMark")
+            end
+
+            local nameLabel = assignScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            nameLabel:SetPoint("LEFT", iconTex, "RIGHT", 6, 0)
+            nameLabel:SetText(item.label or key)
+            nameLabel:SetWidth(180)
+            nameLabel:SetJustifyH("LEFT")
+            nameLabel:SetTextColor(1, 1, 1, 1)
+
+            local currentCluster = GetBarClusterAssignment(clusterSettings, key)
+            local clusterBtn = CreateFrame("Button", nil, assignScrollChild, "UIPanelButtonTemplate")
+            clusterBtn:SetSize(80, 20)
+            clusterBtn:SetPoint("LEFT", nameLabel, "RIGHT", 8, 0)
+            clusterBtn:SetText("Cluster " .. currentCluster)
+            clusterBtn._spellKey = key
+
+            clusterBtn:SetScript("OnClick", function(self, button)
+                local clusterCount = clusterSettings.clusterCount or 3
+                local current = GetBarClusterAssignment(clusterSettings, self._spellKey)
+                local newCluster
+                if button == "RightButton" then
+                    newCluster = current - 1
+                    if newCluster < 1 then newCluster = clusterCount end
+                else
+                    newCluster = current + 1
+                    if newCluster > clusterCount then newCluster = 1 end
+                end
+                clusterSettings.clusterAssignments[self._spellKey] = newCluster
+                RemoveBarKeyFromAllClusterOrders(clusterSettings, self._spellKey)
+                AddBarKeyToClusterOrderEnd(clusterSettings, newCluster, self._spellKey)
+                self:SetText("Cluster " .. newCluster)
+                if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+                RebuildSpellAssignmentRows()
+            end)
+            clusterBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+            local upBtn = CreateFrame("Button", nil, assignScrollChild, "UIPanelButtonTemplate")
+            upBtn:SetSize(28, 20)
+            upBtn:SetPoint("LEFT", clusterBtn, "RIGHT", 4, 0)
+            upBtn:SetText("Up")
+            upBtn._spellKey = key
+            upBtn:SetScript("OnClick", function(self)
+                local k = tostring(NormalizeBarSpellKey(self._spellKey))
+                local ci = GetBarClusterAssignment(clusterSettings, k)
+                local orderList = GetBarClusterManualOrder(clusterSettings, ci)
+                local pos
+                for i, v in ipairs(orderList) do
+                    if tostring(v) == k then pos = i; break end
+                end
+                if pos and pos > 1 then
+                    orderList[pos], orderList[pos - 1] = orderList[pos - 1], orderList[pos]
+                    if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+                    RebuildSpellAssignmentRows()
+                end
+            end)
+
+            local downBtn = CreateFrame("Button", nil, assignScrollChild, "UIPanelButtonTemplate")
+            downBtn:SetSize(28, 20)
+            downBtn:SetPoint("LEFT", upBtn, "RIGHT", 2, 0)
+            downBtn:SetText("Dw")
+            downBtn._spellKey = key
+            downBtn:SetScript("OnClick", function(self)
+                local k = tostring(NormalizeBarSpellKey(self._spellKey))
+                local ci = GetBarClusterAssignment(clusterSettings, k)
+                local orderList = GetBarClusterManualOrder(clusterSettings, ci)
+                local pos
+                for i, v in ipairs(orderList) do
+                    if tostring(v) == k then pos = i; break end
+                end
+                if pos and pos < #orderList then
+                    orderList[pos], orderList[pos + 1] = orderList[pos + 1], orderList[pos]
+                    if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+                    RebuildSpellAssignmentRows()
+                end
+            end)
+
+            -- Glow controls (second line of row)
+            clusterSettings.spellGlows = clusterSettings.spellGlows or {}
+            local glowCfg = clusterSettings.spellGlows[key] or { enabled = false, mode = "show", color = {r=1, g=1, b=0, a=1} }
+            clusterSettings.spellGlows[key] = glowCfg
+
+            local glowBtn = CreateFrame("Button", nil, assignScrollChild, "UIPanelButtonTemplate")
+            glowBtn:SetSize(50, 18)
+            glowBtn:SetPoint("TOPLEFT", iconTex, "BOTTOMLEFT", 0, -2)
+            glowBtn:SetText(glowCfg.enabled and "Glow:ON" or "Glow:OFF")
+            glowBtn._spellKey = key
+            glowBtn:SetScript("OnClick", function(self)
+                local cfg = clusterSettings.spellGlows[self._spellKey]
+                cfg.enabled = not cfg.enabled
+                self:SetText(cfg.enabled and "Glow:ON" or "Glow:OFF")
+            end)
+
+            local modeBtn = CreateFrame("Button", nil, assignScrollChild, "UIPanelButtonTemplate")
+            modeBtn:SetSize(80, 18)
+            modeBtn:SetPoint("LEFT", glowBtn, "RIGHT", 4, 0)
+            local modeLabels = { show = "On Show", inactive = "On Inactive" }
+            modeBtn:SetText(modeLabels[glowCfg.mode] or "On Show")
+            modeBtn._spellKey = key
+            modeBtn:SetScript("OnClick", function(self)
+                local cfg = clusterSettings.spellGlows[self._spellKey]
+                if cfg.mode == "show" then
+                    cfg.mode = "inactive"
+                else
+                    cfg.mode = "show"
+                end
+                self:SetText(modeLabels[cfg.mode] or "On Show")
+            end)
+
+            local colorSwatch = CreateFrame("Button", nil, assignScrollChild, "BackdropTemplate")
+            colorSwatch:SetSize(18, 18)
+            colorSwatch:SetPoint("LEFT", modeBtn, "RIGHT", 4, 0)
+            colorSwatch:SetBackdrop({bgFile = "Interface/Buttons/WHITE8x8", edgeFile = "Interface/Buttons/WHITE8x8", edgeSize = 1})
+            local gc = glowCfg.color or {r=1, g=1, b=0, a=1}
+            colorSwatch:SetBackdropColor(gc.r, gc.g, gc.b, gc.a or 1)
+            colorSwatch:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
+            colorSwatch._spellKey = key
+            colorSwatch:SetScript("OnClick", function(self)
+                local cfg = clusterSettings.spellGlows[self._spellKey]
+                local c = cfg.color or {r=1, g=1, b=0, a=1}
+                local info = {}
+                info.r, info.g, info.b = c.r, c.g, c.b
+                info.opacity = c.a or 1
+                info.hasOpacity = true
+                info.swatchFunc = function()
+                    local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                    local na = ColorPickerFrame:GetColorAlpha()
+                    cfg.color = {r=nr, g=ng, b=nb, a=na}
+                    self:SetBackdropColor(nr, ng, nb, na)
+                end
+                info.opacityFunc = info.swatchFunc
+                info.cancelFunc = function(prev)
+                    cfg.color = {r=prev.r, g=prev.g, b=prev.b, a=prev.opacity or 1}
+                    self:SetBackdropColor(prev.r, prev.g, prev.b, prev.opacity or 1)
+                end
+                ColorPickerFrame:SetupColorPickerAndShow(info)
+            end)
+
+            assignRows[idx] = { icon = iconTex, name = nameLabel, btn = clusterBtn, upBtn = upBtn, downBtn = downBtn, glowBtn = glowBtn, modeBtn = modeBtn, colorSwatch = colorSwatch }
+        end
+
+        if #spellItems == 0 then
+            local noSpells = assignScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            noSpells:SetPoint("TOPLEFT", 0, 0)
+            noSpells:SetText("No spells detected yet. Trigger some cooldowns and click Refresh List.")
+            noSpells:SetTextColor(0.6, 0.6, 0.6, 1)
+            assignRows[1] = { name = noSpells }
+        end
+    end
+
+    RebuildSpellAssignmentRows()
+
+    refreshListBtn:SetScript("OnClick", function()
+        RebuildSpellAssignmentRows()
+        print("Spell list refreshed.")
+    end)
+
+    local function UpdateClusterControlsVisibility()
+        if clusterSettings.clusterMode then
+            clusterControls:Show()
+        else
+            clusterControls:Hide()
+            HideAllBarClusterAnchors()
+        end
+        if RepositionBelowCluster then RepositionBelowCluster() end
+    end
+    UpdateClusterControlsVisibility()
+
+    clusterEnabledCheck:SetScript("OnClick", function(self)
+        local enabled = self:GetChecked()
+        clusterSettings.clusterMode = enabled
+        UpdateClusterControlsVisibility()
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+        if enabled then
+            print("Bar Cluster Mode enabled.")
+        else
+            print("Bar Cluster Mode disabled.")
+        end
+    end)
+
+    -- Aspect Ratio Slider (0.5 to 2.0, shown as X:Y)
+    local aspectLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    aspectLabel:SetPoint("TOPLEFT", clusterControls, "BOTTOMLEFT", 0, -16)
+
+    RepositionBelowCluster = function()
+        aspectLabel:ClearAllPoints()
+        if clusterSettings.clusterMode and clusterControls:IsShown() then
+            aspectLabel:SetPoint("TOPLEFT", clusterControls, "BOTTOMLEFT", 0, -16)
+        else
+            aspectLabel:SetPoint("TOPLEFT", clusterEnabledCheck, "BOTTOMLEFT", 0, -16)
+        end
+    end
+
+    aspectLabel:SetText("Icon Aspect Ratio:")
+    aspectLabel:SetTextColor(0.9,0.9,0.9,1)
+    local aspectSlider = CreateFrame("Slider", "CkraigBarOptionsPanelAspectSlider", content, "OptionsSliderTemplate")
+    aspectSlider:SetPoint("LEFT", aspectLabel, "RIGHT", 8, 0)
+    aspectSlider:SetMinMaxValues(0.5, 2.0)
+    aspectSlider:SetValueStep(0.01)
+    aspectSlider:SetObeyStepOnDrag(true)
+    aspectSlider:SetWidth(120)
+    local aspectVal = 1.0
+    local aspectStr = tostring(CkraigCooldownManager.db.profile.buffBars.aspectRatio or "1:1")
+    local aspectW, aspectH = aspectStr:match("^(%d+):(%d+)$")
+    if aspectW and aspectH then aspectVal = tonumber(aspectW) / tonumber(aspectH) end
+    aspectSlider:SetValue(aspectVal)
+    aspectSlider:HookScript("OnValueChanged", function(self, value)
+        local ratio = math.floor(value * 100 + 0.5) / 100
+        shown = ratio >= 1 and (ratio .. ":1") or ("1:" .. math.floor(1/ratio + 0.5))
+        CkraigCooldownManager.db.profile.buffBars.aspectRatio = shown
+        _G[self:GetName() .. 'Text']:SetText(shown)
+    end)
+    _G[aspectSlider:GetName() .. 'Low']:SetText("0.5")
+    _G[aspectSlider:GetName() .. 'High']:SetText("2.0")
+    local shown = aspectVal >= 1 and (aspectVal .. ":1") or ("1:" .. math.floor(1/aspectVal + 0.5))
+    _G[aspectSlider:GetName() .. 'Text']:SetText(shown)
+    AttachSliderInputBox(aspectSlider, 0.5, 2.0, function(val)
+        local ratio = math.floor(val * 100 + 0.5) / 100
+        local shown = ratio >= 1 and (ratio .. ":1") or ("1:" .. math.floor(1/ratio + 0.5))
+        CkraigCooldownManager.db.profile.buffBars.aspectRatio = shown
+        _G[aspectSlider:GetName() .. 'Text']:SetText(shown)
+    end)
+
+    -- Corner Radius Slider (0-20)
+    local radiusLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    radiusLabel:SetPoint("TOPLEFT", aspectLabel, "BOTTOMLEFT", 0, -36)
+    radiusLabel:SetText("Icon Corner Radius:")
+    radiusLabel:SetTextColor(0.9,0.9,0.9,1)
+    local radiusSlider = CreateFrame("Slider", "CkraigBarOptionsPanelRadiusSlider", content, "OptionsSliderTemplate")
+    radiusSlider:SetPoint("LEFT", radiusLabel, "RIGHT", 8, 0)
+    radiusSlider:SetMinMaxValues(0, 20)
+    radiusSlider:SetValueStep(1)
+    radiusSlider:SetObeyStepOnDrag(true)
+    radiusSlider:SetWidth(120)
+    radiusSlider:SetValue(CkraigCooldownManager.db.profile.buffBars.cornerRadius or 0)
+    radiusSlider:HookScript("OnValueChanged", function(self, value)
+        CkraigCooldownManager.db.profile.buffBars.cornerRadius = math.floor(value)
+        _G[self:GetName() .. 'Text']:SetText(tostring(math.floor(value)))
+    end)
+    _G[radiusSlider:GetName() .. 'Low']:SetText("0")
+    _G[radiusSlider:GetName() .. 'High']:SetText("20")
+    _G[radiusSlider:GetName() .. 'Text']:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.cornerRadius or 0))
+    AttachSliderInputBox(radiusSlider, 0, 20, function(val)
+        CkraigCooldownManager.db.profile.buffBars.cornerRadius = math.floor(val)
+        _G[radiusSlider:GetName() .. 'Text']:SetText(tostring(math.floor(val)))
+    end)
+
+    -- Stack/Application Number X Offset Slider (now under Icon Corner Radius)
+    local stackFontXLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    stackFontXLabel:SetPoint("TOPLEFT", radiusLabel, "BOTTOMLEFT", 0, -36)
+    stackFontXLabel:SetText("Stack/Application Number X Offset:")
+    stackFontXLabel:SetTextColor(0.9,0.9,0.9,1)
+    local stackFontXSlider = CreateFrame("Slider", "CkraigBarOptionsPanelStackFontXSlider", content, "OptionsSliderTemplate")
+    stackFontXSlider:SetPoint("LEFT", stackFontXLabel, "RIGHT", 8, 0)
+    stackFontXSlider:SetMinMaxValues(-50, 50)
+    stackFontXSlider:SetValueStep(1)
+    stackFontXSlider:SetObeyStepOnDrag(true)
+    stackFontXSlider:SetWidth(120)
+    stackFontXSlider:SetValue(CkraigCooldownManager.db.profile.buffBars.stackFontOffsetX or 0)
+    stackFontXSlider:HookScript("OnValueChanged", function(self, value)
+        CkraigCooldownManager.db.profile.buffBars.stackFontOffsetX = math.floor(value)
+        _G[self:GetName() .. 'Text']:SetText(tostring(math.floor(value)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+    _G[stackFontXSlider:GetName() .. 'Low']:SetText("-50")
+    _G[stackFontXSlider:GetName() .. 'High']:SetText("50")
+    _G[stackFontXSlider:GetName() .. 'Text']:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.stackFontOffsetX or 0))
+    AttachSliderInputBox(stackFontXSlider, -50, 50, function(val)
+        CkraigCooldownManager.db.profile.buffBars.stackFontOffsetX = math.floor(val)
+        _G[stackFontXSlider:GetName() .. 'Text']:SetText(tostring(math.floor(val)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    -- Stack/Application Number Y Offset Slider (now under X Offset)
+    local stackFontYLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    stackFontYLabel:SetPoint("TOPLEFT", stackFontXLabel, "BOTTOMLEFT", 0, -36)
+    stackFontYLabel:SetText("Stack/Application Number Y Offset:")
+    stackFontYLabel:SetTextColor(0.9,0.9,0.9,1)
+    local stackFontYSlider = CreateFrame("Slider", "CkraigBarOptionsPanelStackFontYSlider", content, "OptionsSliderTemplate")
+    stackFontYSlider:SetPoint("TOPLEFT", stackFontYLabel, "BOTTOMLEFT", 0, -8)
+    stackFontYSlider:SetMinMaxValues(-50, 50)
+    stackFontYSlider:SetValueStep(1)
+    stackFontYSlider:SetObeyStepOnDrag(true)
+    stackFontYSlider:SetWidth(120)
+    stackFontYSlider:SetValue(CkraigCooldownManager.db.profile.buffBars.stackFontOffsetY or 0)
+    stackFontYSlider:HookScript("OnValueChanged", function(self, value)
+        CkraigCooldownManager.db.profile.buffBars.stackFontOffsetY = math.floor(value)
+        _G[self:GetName() .. 'Text']:SetText(tostring(math.floor(value)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+    _G[stackFontYSlider:GetName() .. 'Low']:SetText("-50")
+    _G[stackFontYSlider:GetName() .. 'High']:SetText("50")
+    _G[stackFontYSlider:GetName() .. 'Text']:SetText(tostring(CkraigCooldownManager.db.profile.buffBars.stackFontOffsetY or 0))
+    AttachSliderInputBox(stackFontYSlider, -50, 50, function(val)
+        CkraigCooldownManager.db.profile.buffBars.stackFontOffsetY = math.floor(val)
+        _G[stackFontYSlider:GetName() .. 'Text']:SetText(tostring(math.floor(val)))
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    _G.CkraigBarOptionsPanel = panel
+    -- Add creator note at bottom left
+    local creatorNote = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    creatorNote:SetPoint("TOPLEFT", stackFontYLabel, "TOPLEFT", 16, -106)
+    creatorNote:SetText("inspired from LazarUI")
+    creatorNote:SetTextColor(0.2, 1, 0.2, 1)
+
+    -- Place checkboxes above the creator note at the bottom left
+    local hideIconsCheck = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
+    if creatorNote then
+        hideIconsCheck:SetPoint("TOPLEFT", creatorNote, "TOPLEFT", 20, -22)
+    else
+        hideIconsCheck:SetPoint("TOPLEFT", content, "BOTTOMLEFT", 16, 40)
+    end
+
+    hideIconsCheck.text = hideIconsCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    hideIconsCheck.text:SetPoint("LEFT", hideIconsCheck, "RIGHT", 4, -20)
+    
+    hideIconsCheck.text:SetText("Hide Icons")
+    hideIconsCheck:SetChecked(CkraigCooldownManager.db.profile.buffBars.hideIcons or false)
+    hideIconsCheck:SetScript("OnClick", function(self)
+        CkraigCooldownManager.db.profile.buffBars.hideIcons = self:GetChecked()
+        RefreshAllBarIconVisibility()
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    -- Add Icon Visibility Toggle Button next to Hide Icons checkbox
+    local iconToggleBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    iconToggleBtn:SetSize(90, 22)
+    iconToggleBtn:SetPoint("LEFT", hideIconsCheck.text, "RIGHT", 24, 20)
+    iconToggleBtn:SetText(CkraigCooldownManager.db.profile.buffBars.hideIcons and "Show Icons" or "Hide Icons")
+    iconToggleBtn:SetScript("OnClick", function(self)
+        local current = CkraigCooldownManager.db.profile.buffBars.hideIcons
+        CkraigCooldownManager.db.profile.buffBars.hideIcons = not current
+        hideIconsCheck:SetChecked(not current)
+        self:SetText(not current and "Show Icons" or "Hide Icons")
+        RefreshAllBarIconVisibility()
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then
+            CkraigCooldownManager:RepositionAllBars()
+        end
+    end)
+
+    -- Add red warning note next to Hide Icons checkbox
+    local hideIconsNote = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    hideIconsNote:SetPoint("LEFT", hideIconsCheck.text, "RIGHT", 12, 0)
+    hideIconsNote:SetText("(If you hide icons here, set display mode to Name Only in Edit Mode)")
+    hideIconsNote:SetTextColor(1, 0.1, 0.1, 1)
+
+    local hideNameCheck = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
+    hideNameCheck:SetPoint("BOTTOMLEFT", hideIconsCheck, "TOPLEFT", 0, 8)
+    hideNameCheck.text = hideNameCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    hideNameCheck.text:SetPoint("LEFT", hideNameCheck, "RIGHT", 4, 0)
+    hideNameCheck.text:SetText("Hide Bar Name")
+    hideNameCheck:SetChecked(CkraigCooldownManager.db.profile.buffBars.hideBarName or false)
+    hideNameCheck:SetScript("OnClick", function(self)
+        CkraigCooldownManager.db.profile.buffBars.hideBarName = self:GetChecked()
+        if type(CkraigCooldownManager.RepositionAllBars) == "function" then CkraigCooldownManager:RepositionAllBars() end
+    end)
+
+    -- Add Profile Management Button (opens shared ProfileManager)
+    local profileBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    profileBtn:SetSize(160, 24)
+    profileBtn:SetText("Manage Profiles")
+    profileBtn:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -16, 16)
+    profileBtn:SetScript("OnClick", function()
+        -- Open the shared ProfileManager panel
+        if LibStub and LibStub("AceConfigDialog-3.0", true) then
+            LibStub("AceConfigDialog-3.0"):Open("CkraigCooldownManager Profiles")
+        elseif _G.CkraigProfileManagerPanel then
+            -- Fallback: open via Blizzard options
+            if Settings and Settings.OpenToCategory then
+                Settings.OpenToCategory("Ckraig Cooldown Manager - Profiles")
+            elseif _G.InterfaceOptionsFrame_OpenToCategory then
+                _G.InterfaceOptionsFrame_OpenToCategory(_G.CkraigProfileManagerPanel)
+            end
+        else
+            print("Profile Manager not available. Check that ProfileManager.lua is loaded.")
+        end
+    end)
+
+    return panel
+end
+
+-- Create on ADDON_LOADED (earlier than PLAYER_LOGIN) to guarantee panel exists for options registration
+local barOptionsInit = CreateFrame("Frame")
+barOptionsInit:RegisterEvent("ADDON_LOADED")
+barOptionsInit:SetScript("OnEvent", function(_, _, addonName)
+    if addonName == "CkraigCooldownManager" then
+        if type(_G.EnsureCkraigBarOptionsPanel) == "function" then
+            _G.EnsureCkraigBarOptionsPanel()
+        elseif type(_G.CreateCkraigBarOptionsPanel) == "function" then
+            _G.CreateCkraigBarOptionsPanel()
+        end
+    end
+end)

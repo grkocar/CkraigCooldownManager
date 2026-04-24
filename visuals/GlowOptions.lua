@@ -1,0 +1,9 @@
+-- ============================================================
+-- CkraigCooldownManager :: Visuals :: GlowOptions
+-- ============================================================
+-- The Blizzard Settings panel for configuring glow style,
+-- colour, and per-viewer glow behaviour.
+-- ============================================================
+-- This panel is built lazily via CCM_CreateGlowOptionsPanel()
+-- and registered as a subcategory by MainOptionsPanel.lua.
+-- ============================================================

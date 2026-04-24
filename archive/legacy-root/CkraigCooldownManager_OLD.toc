@@ -1,0 +1,40 @@
+## Interface: 120000,120001
+## Title: CkraigCooldownManager
+## Notes: Centered Buff tracker and Cooldown Custom bar colors per spell clustermode for bars and buffs, with optional cooldown charge tracking and Trinket/racial tracking.Essentail Cooldowntracker Utility,Potions,Custom Spells track by Spellids. 
+## Author: Ckraigfriend
+## Version: 2.0
+## Category: Unit Frames
+## SavedVariables: MyEssentialBuffTrackerDB,MyUtilityBuffTrackerDB,UtilityIconDuplicatorDB,DYNAMICICONSDB,DYNAMICBARSDB,CooldownChargeDB,CkraigCooldownManagerDB,CCM_Settings,TrinketTrackerDB,PowerPotionSuccessIconDB,CCM_TrackedSpellsDB,CCM_SegmentBarsDB
+
+## OptionalDeps: Ace3, LibStub, CallbackHandler-1.0, LibSharedMedia-3.0, LibCustomGlow-1.0
+
+Libs/LibStub/LibStub.lua
+Libs/CallbackHandler-1.0/CallbackHandler-1.0.lua
+Libs/AceAddon-3.0/AceAddon-3.0.xml
+Libs/AceEvent-3.0/AceEvent-3.0.xml
+Libs/AceDB-3.0/AceDB-3.0.xml
+Libs/AceGUI-3.0/AceGUI-3.0.xml
+Libs/AceConfig-3.0/AceConfigRegistry-3.0/AceConfigRegistry-3.0.lua
+Libs/AceConfig-3.0/AceConfigCmd-3.0/AceConfigCmd-3.0.lua
+Libs/AceConfig-3.0/AceConfigDialog-3.0/AceConfigDialog-3.0.lua
+Libs/AceConfig-3.0/AceConfig-3.0.lua
+Libs/AceDBOptions-3.0/AceDBOptions-3.0.lua
+Libs/AceSerializer-3.0/AceSerializer-3.0.lua
+Libs/LibSharedMedia-3.0/LibSharedMedia-3.0/LibSharedMedia-3.0.lua
+Libs/LibCustomGlow-1.0/LibCustomGlow-1.0.xml
+Libs/LibEditModeOverride/LibEditModeOverride.lua
+Libs/LibEditMode/embed.xml
+
+CkraigCooldownManager.lua
+ProfileManager.lua
+MyEssentialBuffTracker.lua
+MyUtilityBuffTracker.lua
+DYNAMICICONS.lua
+CCM_CooldownBars.lua
+CkraigsOptions.lua
+ChargeTextColorOptions.lua
+TrinketRacials.lua
+PowerPotionSuccessIcon.lua
+CCM_TrackedSpells.lua
+glows.lua
+SegmentBars.lua

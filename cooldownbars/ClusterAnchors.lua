@@ -1,0 +1,23 @@
+-- ============================================================
+-- CkraigCooldownManager :: CooldownBars :: ClusterAnchors
+-- ============================================================
+-- Cluster anchor management (implemented in BarCore.lua, exposed
+-- via CkraigCooldownManager._barInternals):
+--
+--   MAX_BAR_CLUSTERS = 10
+--   barClusterAnchors   — table of active anchor frames
+--
+--   EnsureBarClusterAnchor(settings, index)
+--     Create or return the cluster anchor for the given index.
+--     Includes drag handling, arrow-key nudging, and
+--     LibEditMode per-layout position persistence.
+--
+--   ApplyBarClusterDragState(settings)
+--     Show/hide cluster anchor chrome based on unlock state.
+--
+--   HideAllBarClusterAnchors()
+--     Hide every cluster anchor frame.
+--
+-- LibEditMode callbacks (enter/exit/layout) are wired in
+-- SetupEditModeCallbacks(), called from OnEnable.
+-- ============================================================
