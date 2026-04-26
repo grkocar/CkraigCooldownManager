@@ -322,6 +322,34 @@ function CCM.BuildEssentialBuffsOptions()
                         get = function() local db = GetDB(); return db and db.clusterCenterIcons end,
                         set = function(_, val) local db = GetDB(); if db then db.clusterCenterIcons = val; Refresh() end end,
                     },
+                    clusterUnlockedNote = {
+                        type = "description",
+                        name = function()
+                            local db = GetDB()
+                            local anyFree = false
+                            if db and db.clusterFreePositionModes then
+                                for _, v in pairs(db.clusterFreePositionModes) do
+                                    if v then anyFree = true; break end
+                                end
+                            end
+                            if anyFree then
+                                return "|cFFFFD700Free Position Mode active:|r Unlock Cluster Boxes, then |cFFFFFFFFright-click|r an icon to select it (yellow glow). Use |cFFFFFFFFArrow Keys|r to nudge 1px, |cFFFFFFFFShift+Arrow|r for 10px. Right-click again or press Escape to deselect."
+                            end
+                            return ""
+                        end,
+                        order = 2.5,
+                        width = "full",
+                        hidden = function()
+                            local db = GetDB()
+                            if not db or not db.multiClusterMode then return true end
+                            if db.clusterFreePositionModes then
+                                for _, v in pairs(db.clusterFreePositionModes) do
+                                    if v then return false end
+                                end
+                            end
+                            return true
+                        end,
+                    },
                     clusterUnlocked = {
                         type = "toggle",
                         name = "Unlock Cluster Boxes",
@@ -430,6 +458,25 @@ function CCM.BuildEssentialBuffsOptions()
                         if db then
                             db.clusterFlows = db.clusterFlows or {}
                             db.clusterFlows[i] = val
+                            Refresh()
+                        end
+                    end,
+                },
+                freePositionMode = {
+                    type = "toggle",
+                    name = "Free Position Icons",
+                    desc = "Icons in this cluster can be positioned individually. Enable 'Unlock Cluster Boxes', then right-click an icon to select it (yellow glow), use Arrow Keys to nudge 1px, Shift+Arrow for 10px. Right-click again or press Escape to deselect.",
+                    order = 3,
+                    width = "full",
+                    get = function()
+                        local db = GetDB()
+                        return db and db.clusterFreePositionModes and db.clusterFreePositionModes[i] or false
+                    end,
+                    set = function(_, val)
+                        local db = GetDB()
+                        if db then
+                            db.clusterFreePositionModes = db.clusterFreePositionModes or {}
+                            db.clusterFreePositionModes[i] = val
                             Refresh()
                         end
                     end,

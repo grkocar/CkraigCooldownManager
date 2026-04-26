@@ -85,6 +85,7 @@ local function RebuildSpellListArgs()
                     standalone = "Standalone",
                     essential = "Essential Viewer",
                     utility = "Utility Viewer",
+                    cursor = "Cursor Anchored",
                 },
                 get = function()
                     local d = GetDB()
@@ -110,7 +111,8 @@ local function RebuildSpellListArgs()
                 hidden = function()
                     local d = GetDB()
                     local g = d and d.groups and d.groups[capturedGroupIdx]
-                    return not g or (g.viewerMode or "standalone") == "standalone"
+                    local mode = g and (g.viewerMode or "standalone") or "standalone"
+                    return not g or mode == "standalone" or mode == "cursor"
                 end,
                 get = function()
                     local d = GetDB()
@@ -122,6 +124,89 @@ local function RebuildSpellListArgs()
                     local g = d and d.groups and d.groups[capturedGroupIdx]
                     if not g then return end
                     g.viewerSortOrder = val
+                    Refresh()
+                end,
+            }
+            order = order + 1
+
+            -- Cursor-mode per-group options (visible only when cursor mode is selected)
+            spellTab.args["groupCursorOffsetX_" .. gi] = {
+                type = "range",
+                name = "Cursor X Offset",
+                desc = "Horizontal offset of icons from the cursor.",
+                order = order,
+                min = -500, max = 500, step = 1,
+                width = 1.0,
+                hidden = function()
+                    local d = GetDB()
+                    local g = d and d.groups and d.groups[capturedGroupIdx]
+                    return not g or (g.viewerMode or "standalone") ~= "cursor"
+                end,
+                get = function()
+                    local d = GetDB()
+                    local g = d and d.groups and d.groups[capturedGroupIdx]
+                    return g and tonumber(g.cursorOffsetX) or 0
+                end,
+                set = function(_, val)
+                    local d = GetDB()
+                    local g = d and d.groups and d.groups[capturedGroupIdx]
+                    if not g then return end
+                    g.cursorOffsetX = val
+                    Refresh()
+                end,
+            }
+            order = order + 1
+
+            spellTab.args["groupCursorOffsetY_" .. gi] = {
+                type = "range",
+                name = "Cursor Y Offset",
+                desc = "Vertical offset of icons from the cursor.",
+                order = order,
+                min = -500, max = 500, step = 1,
+                width = 1.0,
+                hidden = function()
+                    local d = GetDB()
+                    local g = d and d.groups and d.groups[capturedGroupIdx]
+                    return not g or (g.viewerMode or "standalone") ~= "cursor"
+                end,
+                get = function()
+                    local d = GetDB()
+                    local g = d and d.groups and d.groups[capturedGroupIdx]
+                    return g and tonumber(g.cursorOffsetY) or 0
+                end,
+                set = function(_, val)
+                    local d = GetDB()
+                    local g = d and d.groups and d.groups[capturedGroupIdx]
+                    if not g then return end
+                    g.cursorOffsetY = val
+                    Refresh()
+                end,
+            }
+            order = order + 1
+
+            spellTab.args["groupCursorDirection_" .. gi] = {
+                type = "select",
+                name = "Growth Direction",
+                desc = "Direction icons grow from the cursor anchor point.",
+                order = order,
+                width = 1.0,
+                values = opts.DIRECTION_VALUES,
+                hidden = function()
+                    local d = GetDB()
+                    local g = d and d.groups and d.groups[capturedGroupIdx]
+                    return not g or (g.viewerMode or "standalone") ~= "cursor"
+                end,
+                get = function()
+                    local d = GetDB()
+                    local g = d and d.groups and d.groups[capturedGroupIdx]
+                    return (g and g.placement and g.placement.direction) or "RIGHT"
+                end,
+                set = function(_, val)
+                    local d = GetDB()
+                    local g = d and d.groups and d.groups[capturedGroupIdx]
+                    if not g then return end
+                    g.placement = g.placement or {}
+                    g.placement.direction = val
                     Refresh()
                 end,
             }
@@ -189,6 +274,29 @@ local function RebuildSpellListArgs()
                                 g.spellCountSettings = g.spellCountSettings or {}
                                 g.spellCountSettings[skey] = g.spellCountSettings[skey] or {}
                                 g.spellCountSettings[skey].show = val and true or false
+                                Refresh()
+                            end,
+                        },
+                        onlyOnCooldown = {
+                            type = "toggle",
+                            name = "Only On Cooldown",
+                            desc = "Hide this icon when the spell is ready. Show it only while it is cooling down.",
+                            order = 3.5,
+                            width = 0.9,
+                            get = function()
+                                local d = GetDB()
+                                local g = d and d.groups and d.groups[capturedGI]
+                                if not g then return false end
+                                local skey = tostring(sid)
+                                return g.spellOnlyOnCooldown and g.spellOnlyOnCooldown[skey] == true
+                            end,
+                            set = function(_, val)
+                                local d = GetDB()
+                                local g = d and d.groups and d.groups[capturedGI]
+                                if not g then return end
+                                local skey = tostring(sid)
+                                g.spellOnlyOnCooldown = g.spellOnlyOnCooldown or {}
+                                g.spellOnlyOnCooldown[skey] = val and true or nil
                                 Refresh()
                             end,
                         },
@@ -327,6 +435,31 @@ local function RebuildSpellListArgs()
                                 local skey = tostring(sid)
                                 g.spellSizes = g.spellSizes or {}
                                 g.spellSizes[skey] = val
+                                Refresh()
+                            end,
+                        },
+                        iconXOffset = {
+                            type = "range",
+                            name = "Icon X",
+                            order = 8,
+                            min = -200,
+                            max = 200,
+                            step = 1,
+                            width = 0.8,
+                            get = function()
+                                local d = GetDB()
+                                local g = d and d.groups and d.groups[capturedGI]
+                                if not g then return 0 end
+                                local skey = tostring(sid)
+                                return (g.spellXOffsets and g.spellXOffsets[skey]) or 0
+                            end,
+                            set = function(_, val)
+                                local d = GetDB()
+                                local g = d and d.groups and d.groups[capturedGI]
+                                if not g then return end
+                                local skey = tostring(sid)
+                                g.spellXOffsets = g.spellXOffsets or {}
+                                g.spellXOffsets[skey] = val
                                 Refresh()
                             end,
                         },

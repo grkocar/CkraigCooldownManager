@@ -178,6 +178,23 @@ local DEFAULTS = {
 
     -- Per-spell cooldown override (show actual CD instead of buff timer)
     cooldownOverrideSpells = {},
+
+    -- Multi-Cluster Mode
+    multiClusterMode = false,
+    clusterCount = 5,
+    clusterUnlocked = false,
+    clusterFlow = "horizontal",
+    clusterFlows = {},
+    clusterVerticalGrows = {},
+    clusterVerticalPins = {},
+    clusterIconSizes = {},
+    clusterAssignments = {},
+    clusterPositions = {},
+    clusterManualOrders = {},
+    clusterCenterIcons = true,
+    clusterSampleDisplayModes = {},
+    clusterFreePositionModes = {},
+    clusterIconFreePositions = {},
 }
 
 local LCG = LibStub("LibCustomGlow-1.0", true)
@@ -474,6 +491,22 @@ local function EnsureDB()
 
     -- Per-spell cooldown overrides
     if MyUtilityBuffTrackerDB.cooldownOverrideSpells == nil then MyUtilityBuffTrackerDB.cooldownOverrideSpells = {} end
+
+    -- Multi-cluster mode
+    if MyUtilityBuffTrackerDB.multiClusterMode == nil then MyUtilityBuffTrackerDB.multiClusterMode = DEFAULTS.multiClusterMode end
+    if MyUtilityBuffTrackerDB.clusterCount == nil then MyUtilityBuffTrackerDB.clusterCount = DEFAULTS.clusterCount end
+    if MyUtilityBuffTrackerDB.clusterUnlocked == nil then MyUtilityBuffTrackerDB.clusterUnlocked = false end
+    if MyUtilityBuffTrackerDB.clusterFlows == nil then MyUtilityBuffTrackerDB.clusterFlows = {} end
+    if MyUtilityBuffTrackerDB.clusterVerticalGrows == nil then MyUtilityBuffTrackerDB.clusterVerticalGrows = {} end
+    if MyUtilityBuffTrackerDB.clusterVerticalPins == nil then MyUtilityBuffTrackerDB.clusterVerticalPins = {} end
+    if MyUtilityBuffTrackerDB.clusterIconSizes == nil then MyUtilityBuffTrackerDB.clusterIconSizes = {} end
+    if MyUtilityBuffTrackerDB.clusterAssignments == nil then MyUtilityBuffTrackerDB.clusterAssignments = {} end
+    if MyUtilityBuffTrackerDB.clusterPositions == nil then MyUtilityBuffTrackerDB.clusterPositions = {} end
+    if MyUtilityBuffTrackerDB.clusterManualOrders == nil then MyUtilityBuffTrackerDB.clusterManualOrders = {} end
+    if MyUtilityBuffTrackerDB.clusterCenterIcons == nil then MyUtilityBuffTrackerDB.clusterCenterIcons = DEFAULTS.clusterCenterIcons end
+    if MyUtilityBuffTrackerDB.clusterSampleDisplayModes == nil then MyUtilityBuffTrackerDB.clusterSampleDisplayModes = {} end
+    if MyUtilityBuffTrackerDB.clusterFreePositionModes == nil then MyUtilityBuffTrackerDB.clusterFreePositionModes = {} end
+    if MyUtilityBuffTrackerDB.clusterIconFreePositions == nil then MyUtilityBuffTrackerDB.clusterIconFreePositions = {} end
 end
 
 -- ---------------------------
@@ -1401,9 +1434,444 @@ local function EnsurePendingEventFrame()
     UtilityIconViewers.__iconSkinEventFrame = ef
 end
 
--- ---------------------------
--- ApplyViewerLayout (layout + skinning)
--- ---------------------------
+-- ============================================================
+-- UTILITY CLUSTER MODE — helpers (mirrors EssentialBuffTracker)
+-- ============================================================
+local MAX_UBT_CLUSTER_GROUPS = 20
+
+local DEFAULT_UBT_CLUSTER_POSITIONS = {
+    [1] = { point = "CENTER", x = -300, y = 200 },
+    [2] = { point = "CENTER", x = -150, y = 200 },
+    [3] = { point = "CENTER", x = 0,    y = 200 },
+    [4] = { point = "CENTER", x = 150,  y = 200 },
+    [5] = { point = "CENTER", x = 300,  y = 200 },
+}
+
+local function GetUBTDefaultClusterPosition(index)
+    if DEFAULT_UBT_CLUSTER_POSITIONS[index] then
+        return DEFAULT_UBT_CLUSTER_POSITIONS[index]
+    end
+    local col = ((index - 1) % 5) - 2
+    local row = math.floor((index - 1) / 5)
+    return { point = "CENTER", x = col * 150, y = 200 + row * 150 }
+end
+
+local function GetUBTClusterManualOrder(settings, clusterIndex)
+    settings.clusterManualOrders = settings.clusterManualOrders or {}
+    if not settings.clusterManualOrders[clusterIndex] then
+        settings.clusterManualOrders[clusterIndex] = {}
+    end
+    return settings.clusterManualOrders[clusterIndex]
+end
+
+local function BuildUBTOrderedKeysForCluster(settings, clusterIndex, availableKeys)
+    local ordered = {}
+    local added = {}
+    settings.clusterAssignments = settings.clusterAssignments or {}
+    local orderList = GetUBTClusterManualOrder(settings, clusterIndex)
+
+    local function CanUseKey(key)
+        local nk = tostring(key)
+        local assigned = tonumber(settings.clusterAssignments[nk]) or 1
+        if assigned ~= clusterIndex then return nil end
+        if availableKeys and not availableKeys[nk] then return nil end
+        return nk
+    end
+
+    for _, key in ipairs(orderList) do
+        local usable = CanUseKey(key)
+        if usable and not added[usable] then
+            table.insert(ordered, usable); added[usable] = true
+        end
+    end
+    local leftovers = {}
+    for key, assigned in pairs(settings.clusterAssignments) do
+        if (tonumber(assigned) or 1) == clusterIndex then
+            local usable = CanUseKey(key)
+            if usable and not added[usable] then
+                table.insert(leftovers, usable); added[usable] = true
+            end
+        end
+    end
+    table.sort(leftovers, function(a, b)
+        local an, bn = tonumber(a), tonumber(b)
+        if an and bn then return an < bn end
+        return tostring(a) < tostring(b)
+    end)
+    for _, k in ipairs(leftovers) do table.insert(ordered, k) end
+    return ordered
+end
+
+local function BuildUBTAvailableKeySet(viewer)
+    local keys = {}
+    local pool = viewer and viewer.itemFramePool
+    if pool then
+        for icon in pool:EnumerateActive() do
+            if icon and icon:IsShown() then
+                local key = GetUtilityIconKey(icon)
+                if key then keys[tostring(key)] = true end
+            end
+        end
+    end
+    return keys
+end
+
+local _ubt_clusterViewerMeta = setmetatable({}, {__mode="k"})
+local function GetUBTViewerMeta(viewer)
+    if not _ubt_clusterViewerMeta[viewer] then _ubt_clusterViewerMeta[viewer] = {} end
+    return _ubt_clusterViewerMeta[viewer]
+end
+
+local function EnsureUBTClusterAnchorForIndex(viewer, settings, index)
+    local vm = GetUBTViewerMeta(viewer)
+    vm.clusterAnchors = vm.clusterAnchors or {}
+    local anchors = vm.clusterAnchors
+    if anchors[index] then return anchors[index] end
+
+    local anchor = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
+    anchor:SetSize(120, 120)
+    anchor:SetMovable(true)
+    anchor:EnableMouse(true)
+    anchor:RegisterForDrag("LeftButton")
+    anchor:SetClampedToScreen(true)
+    anchor:SetFrameStrata("MEDIUM")
+    anchor:SetBackdrop({
+        bgFile   = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = "Interface\\Buttons\\WHITE8x8",
+        edgeSize = 1,
+        insets   = { left=1, right=1, top=1, bottom=1 },
+    })
+    anchor:SetBackdropColor(0, 0, 0, 0.12)
+    anchor:SetBackdropBorderColor(0.2, 0.6, 1.0, 0.9)  -- blue tint for Utility
+    anchor._clusterIndex = index
+
+    anchor:SetScript("OnDragStart", function(self)
+        local s = MyUtilityBuffTracker:GetSettings()
+        if not s or not s.clusterUnlocked then return end
+        if InCombatLockdown() then return end
+        self:StartMoving()
+    end)
+    anchor:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local s = MyUtilityBuffTracker:GetSettings()
+        if not s then return end
+        s.clusterPositions = s.clusterPositions or {}
+        local point, _, relPoint, x, y = self:GetPoint(1)
+        s.clusterPositions[self._clusterIndex] = {
+            point = point or "CENTER", relPoint = relPoint or "CENTER",
+            x = x or 0, y = y or 0,
+        }
+    end)
+
+    anchors[index] = anchor
+    local saved = settings.clusterPositions and settings.clusterPositions[index]
+    local fallback = GetUBTDefaultClusterPosition(index)
+    local pt   = (saved and saved.point)    or fallback.point
+    local rpt  = (saved and saved.relPoint) or pt
+    local px   = (saved and saved.x)        or fallback.x
+    local py   = (saved and saved.y)        or fallback.y
+    anchor:ClearAllPoints()
+    anchor:SetPoint(pt, UIParent, rpt, px, py)
+    anchor:Hide()
+    return anchor
+end
+
+-- Cluster drag/free-position state
+local _ubt_dragState = { draggingIcon = nil, sourceCluster = nil }
+local _ubt_freePosSelected = nil
+local _ubt_freePosViewer   = nil
+local _ubt_freePosKeyFrame = nil
+
+local function UBTFreePosDeselect()
+    if _ubt_freePosSelected then
+        local icon = _ubt_freePosSelected
+        if icon._ubtSelectHighlight then icon._ubtSelectHighlight:Hide() end
+        _ubt_freePosSelected = nil
+        _ubt_freePosViewer   = nil
+    end
+    if _ubt_freePosKeyFrame then _ubt_freePosKeyFrame:EnableKeyboard(false) end
+end
+
+local function UBTFreePosNudge(dx, dy)
+    local icon = _ubt_freePosSelected
+    if not icon then return end
+    local ci = icon._ubtDragCluster
+    local iconKey = GetUtilityIconKey(icon)
+    if not ci or not iconKey then return end
+    local keyStr = tostring(iconKey)
+    local s = MyUtilityBuffTracker:GetSettings()
+    if not s then return end
+    s.clusterIconFreePositions = s.clusterIconFreePositions or {}
+    s.clusterIconFreePositions[ci] = s.clusterIconFreePositions[ci] or {}
+    local pos = s.clusterIconFreePositions[ci][keyStr] or {x=0,y=0}
+    local newX = (pos.x or 0) + dx
+    local newY = (pos.y or 0) + dy
+    s.clusterIconFreePositions[ci][keyStr] = {x=newX, y=newY}
+    if _ubt_freePosViewer then
+        local vm = GetUBTViewerMeta(_ubt_freePosViewer)
+        local anchor = vm.clusterAnchors and vm.clusterAnchors[ci]
+        if anchor then
+            icon:ClearAllPoints()
+            icon:SetPoint("CENTER", anchor, "CENTER", newX, newY)
+        end
+    end
+end
+
+local function UBTFreePosSelect(icon, viewer)
+    UBTFreePosDeselect()
+    _ubt_freePosSelected = icon
+    _ubt_freePosViewer   = viewer
+    if not icon._ubtSelectHighlight then
+        local hl = icon:CreateTexture(nil, "OVERLAY", nil, 7)
+        hl:SetAllPoints()
+        hl:SetColorTexture(1, 0.9, 0, 0.4)
+        icon._ubtSelectHighlight = hl
+    end
+    icon._ubtSelectHighlight:Show()
+    if not _ubt_freePosKeyFrame then
+        local f = CreateFrame("Frame", nil, UIParent)
+        f:SetAllPoints(UIParent)
+        f:SetFrameStrata("TOOLTIP")
+        f:EnableMouse(false)
+        f:EnableKeyboard(false)
+        f:SetScript("OnKeyDown", function(self, key)
+            if not _ubt_freePosSelected then self:EnableKeyboard(false); return end
+            if key == "ESCAPE" then
+                self:SetPropagateKeyboardInput(false)
+                UBTFreePosDeselect(); return
+            end
+            local step = IsShiftKeyDown() and 10 or 1
+            if     key == "UP"    then self:SetPropagateKeyboardInput(false); UBTFreePosNudge(0,  step)
+            elseif key == "DOWN"  then self:SetPropagateKeyboardInput(false); UBTFreePosNudge(0, -step)
+            elseif key == "LEFT"  then self:SetPropagateKeyboardInput(false); UBTFreePosNudge(-step, 0)
+            elseif key == "RIGHT" then self:SetPropagateKeyboardInput(false); UBTFreePosNudge( step, 0)
+            else   self:SetPropagateKeyboardInput(true)
+            end
+        end)
+        _ubt_freePosKeyFrame = f
+    end
+    _ubt_freePosKeyFrame:EnableKeyboard(true)
+end
+
+local function FindUBTClusterForCursor(vm, clusterCount, mx, my)
+    if not vm or not vm.clusterAnchors then return nil end
+    for ci = 1, clusterCount do
+        local anchor = vm.clusterAnchors[ci]
+        if anchor and anchor:IsShown() then
+            local l, r = anchor:GetLeft(), anchor:GetRight()
+            local b, t = anchor:GetBottom(), anchor:GetTop()
+            if l and r and b and t and mx >= l and mx <= r and my >= b and my <= t then
+                return ci, anchor
+            end
+        end
+    end
+    local closest, closestAnchor, dist = nil, nil, 1e9
+    for ci = 1, clusterCount do
+        local anchor = vm.clusterAnchors[ci]
+        if anchor and anchor:IsShown() then
+            local cx, cy = anchor:GetCenter()
+            if cx and cy then
+                local d = (mx-cx)^2 + (my-cy)^2
+                if d < dist then dist=d; closest=ci; closestAnchor=anchor end
+            end
+        end
+    end
+    return closest, closestAnchor
+end
+
+local function FindUBTNearestKeyInCluster(vm, clusterIndex, draggedIcon, mx, my)
+    if not vm or not vm.clusterIconsByIndex then return nil end
+    local iconList = vm.clusterIconsByIndex[clusterIndex]
+    if type(iconList) ~= "table" then return nil end
+    local nearestKey, nearestDist = nil, 1e9
+    for _, child in ipairs(iconList) do
+        if child and child ~= draggedIcon and (child.Icon or child.icon) then
+            local cx, cy = child:GetCenter()
+            local key = GetUtilityIconKey(child)
+            if cx and cy and key then
+                local d = (mx-cx)^2 + (my-cy)^2
+                if d < nearestDist then nearestDist=d; nearestKey=tostring(key) end
+            end
+        end
+    end
+    return nearestKey
+end
+
+local function RemoveKeyFromAllUBTClusterOrders(settings, key)
+    settings.clusterManualOrders = settings.clusterManualOrders or {}
+    local normalized = tostring(key)
+    for _, orderList in pairs(settings.clusterManualOrders) do
+        if type(orderList) == "table" then
+            for i = #orderList, 1, -1 do
+                if tostring(orderList[i]) == normalized then table.remove(orderList, i) end
+            end
+        end
+    end
+end
+
+local function SetupUBTClusterIconDrag(icon, viewer, clusterIndex)
+    if not icon or InCombatLockdown() then return end
+    icon._ubtDragCluster = clusterIndex
+    icon:SetMovable(true)
+    icon:RegisterForDrag("LeftButton")
+    icon:EnableMouse(true)
+
+    icon:SetScript("OnDragStart", function(self)
+        if InCombatLockdown() then return end
+        local s = MyUtilityBuffTracker:GetSettings()
+        if not s or not s.clusterUnlocked then return end
+        local ci = self._ubtDragCluster or clusterIndex
+        _ubt_dragState.draggingIcon = self
+        _ubt_dragState.sourceCluster = ci
+        self:StartMoving()
+        self:SetAlpha(0.6)
+    end)
+
+    icon:SetScript("OnMouseUp", function(self, button)
+        if button ~= "RightButton" then return end
+        if InCombatLockdown() then return end
+        local s = MyUtilityBuffTracker:GetSettings()
+        if not s or not s.clusterUnlocked then return end
+        local ci = self._ubtDragCluster or clusterIndex
+        if not (s.clusterFreePositionModes and s.clusterFreePositionModes[ci]) then return end
+        if _ubt_freePosSelected == self then UBTFreePosDeselect()
+        else UBTFreePosSelect(self, viewer) end
+    end)
+
+    icon:SetScript("OnDragStop", function(self)
+        if InCombatLockdown() then return end
+        self:StopMovingOrSizing()
+        self:SetAlpha(1.0)
+        if _ubt_dragState.draggingIcon ~= self then return end
+
+        local s = MyUtilityBuffTracker:GetSettings()
+        local iconKey = GetUtilityIconKey(self)
+        if not s or not iconKey then
+            _ubt_dragState.draggingIcon = nil
+            _ubt_dragState.sourceCluster = nil
+            pcall(UtilityIconViewers.ApplyViewerLayout, UtilityIconViewers, viewer)
+            return
+        end
+
+        local keyStr = tostring(iconKey)
+        local sourceCluster = tonumber(_ubt_dragState.sourceCluster) or 1
+        local clusterCount = math.max(1, math.min(MAX_UBT_CLUSTER_GROUPS, SafeNumber(s.clusterCount, DEFAULTS.clusterCount) or DEFAULTS.clusterCount))
+
+        -- Free position mode: save offset from anchor and re-anchor directly
+        if s.clusterFreePositionModes and s.clusterFreePositionModes[sourceCluster] then
+            local vm = GetUBTViewerMeta(viewer)
+            local anchor = vm.clusterAnchors and vm.clusterAnchors[sourceCluster]
+            if anchor then
+                local ix, iy = self:GetCenter()
+                local ax, ay = anchor:GetCenter()
+                if ix and iy and ax and ay then
+                    local offsetX = ix - ax
+                    local offsetY = iy - ay
+                    s.clusterIconFreePositions = s.clusterIconFreePositions or {}
+                    s.clusterIconFreePositions[sourceCluster] = s.clusterIconFreePositions[sourceCluster] or {}
+                    s.clusterIconFreePositions[sourceCluster][keyStr] = {x=offsetX, y=offsetY}
+                    self:ClearAllPoints()
+                    self:SetPoint("CENTER", anchor, "CENTER", offsetX, offsetY)
+                end
+            end
+            _ubt_dragState.draggingIcon = nil
+            _ubt_dragState.sourceCluster = nil
+            return
+        end
+
+        -- Normal mode: re-assign icon to cluster under cursor
+        local uiScale = UIParent and UIParent:GetEffectiveScale() or 1
+        local mx, my = GetCursorPosition()
+        mx = mx / uiScale; my = my / uiScale
+
+        local vm = GetUBTViewerMeta(viewer)
+        local targetCluster = FindUBTClusterForCursor(vm, clusterCount, mx, my)
+        targetCluster = tonumber(targetCluster) or sourceCluster
+
+        s.clusterAssignments = s.clusterAssignments or {}
+        s.clusterAssignments[keyStr] = targetCluster
+
+        RemoveKeyFromAllUBTClusterOrders(s, keyStr)
+        local targetOrderList = GetUBTClusterManualOrder(s, targetCluster)
+        local targetKey = FindUBTNearestKeyInCluster(vm, targetCluster, self, mx, my)
+        if targetKey then
+            local inserted = false
+            for idx, existing in ipairs(targetOrderList) do
+                if tostring(existing) == targetKey then
+                    table.insert(targetOrderList, idx, keyStr); inserted = true; break
+                end
+            end
+            if not inserted then table.insert(targetOrderList, keyStr) end
+        else
+            table.insert(targetOrderList, keyStr)
+        end
+
+        _ubt_dragState.draggingIcon = nil
+        _ubt_dragState.sourceCluster = nil
+        pcall(UtilityIconViewers.ApplyViewerLayout, UtilityIconViewers, viewer)
+    end)
+end
+
+local function ApplyUBTClusterIconDragHandlers(viewer, settings, clusterCount, groupedIcons)
+    if not viewer or not settings.clusterUnlocked then return end
+    if InCombatLockdown() then return end
+    for ci = 1, clusterCount do
+        local icons = groupedIcons and groupedIcons[ci]
+        if type(icons) == "table" then
+            for _, child in ipairs(icons) do
+                if child and (child.Icon or child.icon) then
+                    if child._ubtDragCluster ~= ci then
+                        child._ubtDragCluster = ci
+                        pcall(SetupUBTClusterIconDrag, child, viewer, ci)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function ApplyUBTClusterDragState(viewer, settings, forceNow)
+    if not viewer then return end
+    if InCombatLockdown() and not forceNow then return end
+    local vm = GetUBTViewerMeta(viewer)
+    if not vm.clusterAnchors then return end
+    local clusterCount = math.max(1, math.min(MAX_UBT_CLUSTER_GROUPS, SafeNumber(settings.clusterCount, DEFAULTS.clusterCount)))
+    for i = 1, MAX_UBT_CLUSTER_GROUPS do
+        local anchor = vm.clusterAnchors[i]
+        if anchor then
+            local inRange = (i <= clusterCount)
+            local enabled = settings.clusterUnlocked and inRange
+            local sampleMode = string.lower(tostring((settings.clusterSampleDisplayModes and settings.clusterSampleDisplayModes[i]) or "off"))
+            local showForSamples = inRange and (sampleMode == "always")
+            if enabled then
+                anchor:Show()
+                anchor:EnableMouse(true)
+                anchor:SetBackdropColor(0, 0.1, 0.3, 0.25)
+                anchor:SetBackdropBorderColor(0.2, 0.6, 1.0, 0.9)
+            elseif showForSamples then
+                anchor:Show()
+                anchor:EnableMouse(false)
+                anchor:SetBackdropColor(0, 0, 0, 0.05)
+                anchor:SetBackdropBorderColor(0.2, 0.6, 1.0, 0.3)
+            else
+                anchor:Hide()
+            end
+        end
+    end
+end
+
+-- Hide all UBT cluster anchors
+local function HideAllUBTClusterAnchors(viewer)
+    local vm = GetUBTViewerMeta(viewer)
+    if vm.clusterAnchors then
+        for i = 1, MAX_UBT_CLUSTER_GROUPS do
+            local a = vm.clusterAnchors[i]
+            if a then a:Hide() end
+        end
+    end
+end
+
+
 function UtilityIconViewers:ApplyViewerLayout(viewer)
     if not viewer or not viewer.GetName then return end
     if not viewer:IsShown() then return end
@@ -1499,6 +1967,201 @@ function UtilityIconViewers:ApplyViewerLayout(viewer)
 
     local iconWidth, iconHeight = iconSize, iconSize
     local spacing = settings.spacing or DEFAULTS.spacing
+
+    -- ===========================
+    -- CLUSTER MODE
+    -- ===========================
+    if settings.multiClusterMode then
+        local clusterCount = math.max(1, math.min(MAX_UBT_CLUSTER_GROUPS, SafeNumber(settings.clusterCount, DEFAULTS.clusterCount) or DEFAULTS.clusterCount))
+        settings.clusterCount = clusterCount
+        settings.clusterFlows = settings.clusterFlows or {}
+        settings.clusterVerticalGrows = settings.clusterVerticalGrows or {}
+        settings.clusterVerticalPins = settings.clusterVerticalPins or {}
+        settings.clusterIconSizes = settings.clusterIconSizes or {}
+        settings.clusterAssignments = settings.clusterAssignments or {}
+        settings.clusterManualOrders = settings.clusterManualOrders or {}
+        if settings.clusterCenterIcons == nil then settings.clusterCenterIcons = true end
+        local centerClusterIcons = settings.clusterCenterIcons ~= false
+
+        local vm = GetUBTViewerMeta(viewer)
+
+        local groupedIcons = {}
+        for i = 1, clusterCount do
+            groupedIcons[i] = {}
+            EnsureUBTClusterAnchorForIndex(viewer, settings, i)
+        end
+
+        -- Hide excess anchors
+        if vm.clusterAnchors then
+            for i = clusterCount + 1, MAX_UBT_CLUSTER_GROUPS do
+                local anchor = vm.clusterAnchors[i]
+                if anchor then anchor:Hide() end
+            end
+        end
+
+        -- Show active anchors only when unlocked
+        for i = 1, clusterCount do
+            local anchor = vm.clusterAnchors and vm.clusterAnchors[i]
+            if anchor then
+                if settings.clusterUnlocked then anchor:Show() else anchor:Hide() end
+            end
+        end
+
+        -- Assign icons to clusters
+        for _, icon in ipairs(shownIcons) do
+            local key = GetUtilityIconKey(icon)
+            local assignedGroup = tonumber(key and settings.clusterAssignments[tostring(key)]) or 1
+            if assignedGroup < 1 or assignedGroup > clusterCount then assignedGroup = 1 end
+            table.insert(groupedIcons[assignedGroup], icon)
+        end
+
+        local rowLimit = SafeNumber(settings.rowLimit or settings.columns, DEFAULTS.rowLimit)
+        local availableKeys = BuildUBTAvailableKeySet(viewer)
+
+        -- Sort each group by manual order
+        local orderIndexByCluster = {}
+        for i = 1, clusterCount do
+            orderIndexByCluster[i] = {}
+            local orderedKeys = BuildUBTOrderedKeysForCluster(settings, i, availableKeys)
+            for idx, key in ipairs(orderedKeys) do
+                orderIndexByCluster[i][tostring(key)] = idx
+            end
+            table.sort(groupedIcons[i], function(a, b)
+                local keyA = GetUtilityIconKey(a)
+                local keyB = GetUtilityIconKey(b)
+                local posA = keyA and orderIndexByCluster[i][tostring(keyA)]
+                local posB = keyB and orderIndexByCluster[i][tostring(keyB)]
+                if posA and posB and posA ~= posB then return posA < posB end
+                if posA and not posB then return true end
+                if posB and not posA then return false end
+                local aOrder = (IconRuntimeState[a] and IconRuntimeState[a].creationOrder) or 0
+                local bOrder = (IconRuntimeState[b] and IconRuntimeState[b].creationOrder) or 0
+                return aOrder < bOrder
+            end)
+        end
+
+        local totalVisibleIcons = 0
+        for groupIndex = 1, clusterCount do
+            local anchor = vm.clusterAnchors and vm.clusterAnchors[groupIndex]
+            local groupIcons = groupedIcons[groupIndex]
+            if anchor and groupIcons then
+                local clusterFlow = string.lower(tostring(settings.clusterFlows[groupIndex] or settings.clusterFlow or DEFAULTS.clusterFlow or "horizontal"))
+                local verticalGrow = string.lower(tostring(settings.clusterVerticalGrows[groupIndex] or "down"))
+                local verticalPin  = string.lower(tostring(settings.clusterVerticalPins[groupIndex]  or "center"))
+                local clusterIconSize = SafeNumber(settings.clusterIconSizes[groupIndex], iconSize)
+                if clusterFlow ~= "vertical" then clusterFlow = "horizontal" end
+                if verticalGrow ~= "up"      then verticalGrow = "down" end
+                if verticalPin ~= "top" and verticalPin ~= "bottom" then verticalPin = "center" end
+
+                local groupCount = #groupIcons
+                totalVisibleIcons = totalVisibleIcons + groupCount
+                local anchorWidth  = anchor:GetWidth()  or 120
+                local anchorHeight = anchor:GetHeight() or 120
+
+                if groupCount > 0 then
+                    local freeMode = settings.clusterFreePositionModes and settings.clusterFreePositionModes[groupIndex]
+                    if freeMode then
+                        local savedPos = (settings.clusterIconFreePositions and settings.clusterIconFreePositions[groupIndex]) or {}
+                        for idx, icon in ipairs(groupIcons) do
+                            icon:SetSize(clusterIconSize, clusterIconSize)
+                            icon:ClearAllPoints()
+                            local iconKey = GetUtilityIconKey(icon)
+                            local keyStr = iconKey and tostring(iconKey) or ("_idx_"..idx)
+                            local pos = savedPos[keyStr]
+                            if pos then
+                                icon:SetPoint("CENTER", anchor, "CENTER", pos.x or 0, pos.y or 0)
+                            else
+                                local col   = (idx-1) % 3
+                                local row_i = math.floor((idx-1) / 3)
+                                icon:SetPoint("CENTER", anchor, "CENTER",
+                                    (col-1) * (clusterIconSize + spacing),
+                                    -row_i  * (clusterIconSize + spacing))
+                            end
+                        end
+                    else
+                        -- Normal grid/flow layout
+                        local layoutCount = groupCount
+                        local lineSize = layoutCount
+                        local lineCount = 1
+                        if rowLimit and rowLimit > 0 then
+                            lineSize = math.max(1, rowLimit)
+                            lineCount = math.ceil(layoutCount / lineSize)
+                        end
+
+                        local columns, rows
+                        if clusterFlow == "vertical" then
+                            rows = math.min(layoutCount, lineSize); columns = lineCount
+                        else
+                            columns = math.min(layoutCount, lineSize); rows = lineCount
+                        end
+
+                        local yBase = -15 - (clusterIconSize / 2)
+                        if clusterFlow == "vertical" then
+                            if verticalPin == "top"    then yBase = anchorHeight - 5 - (clusterIconSize / 2)
+                            elseif verticalPin == "bottom" then yBase = 5 + (clusterIconSize / 2)
+                            else yBase = anchorHeight / 2 end
+                        end
+
+                        local iconsPerRow = {}
+                        for idx2 = 1, groupCount do
+                            local ri = math.floor((idx2-1) / lineSize)
+                            iconsPerRow[ri] = (iconsPerRow[ri] or 0) + 1
+                        end
+
+                        local rowColCounter = {}
+                        for idx, icon in ipairs(groupIcons) do
+                            local rowIndex, colIndex
+                            if clusterFlow == "vertical" then
+                                rowIndex = (idx-1) % lineSize
+                                colIndex = math.floor((idx-1) / lineSize)
+                            else
+                                rowIndex = math.floor((idx-1) / lineSize)
+                                rowColCounter[rowIndex] = (rowColCounter[rowIndex] or 0)
+                                colIndex = rowColCounter[rowIndex]
+                                rowColCounter[rowIndex] = rowColCounter[rowIndex] + 1
+                            end
+
+                            icon:SetSize(clusterIconSize, clusterIconSize)
+                            icon:ClearAllPoints()
+
+                            if clusterFlow == "vertical" then
+                                local x = 5 + (clusterIconSize/2) + colIndex * (clusterIconSize+spacing)
+                                local y
+                                if verticalPin == "center" then y = yBase + rowIndex*(clusterIconSize+spacing)
+                                elseif verticalGrow == "up" then y = yBase + rowIndex*(clusterIconSize+spacing)
+                                else y = yBase - rowIndex*(clusterIconSize+spacing) end
+                                icon:SetPoint("CENTER", anchor, "BOTTOMLEFT", x, y)
+                            else
+                                if centerClusterIcons then
+                                    local rowCols = iconsPerRow[rowIndex] or columns
+                                    local rowWidth   = rowCols * clusterIconSize + (rowCols-1) * spacing
+                                    local groupHeight = rows  * clusterIconSize + (rows-1)  * spacing
+                                    local x = -rowWidth/2 + clusterIconSize/2 + colIndex*(clusterIconSize+spacing)
+                                    local y =  groupHeight/2 - clusterIconSize/2 - rowIndex*(clusterIconSize+spacing)
+                                    icon:SetPoint("CENTER", anchor, "CENTER", x, y)
+                                else
+                                    local x = 5 + (clusterIconSize/2) + colIndex*(clusterIconSize+spacing)
+                                    local y = (anchorHeight-5) - (clusterIconSize/2) - rowIndex*(clusterIconSize+spacing)
+                                    icon:SetPoint("CENTER", anchor, "BOTTOMLEFT", x, y)
+                                end
+                            end
+                        end
+                    end -- freeMode else
+                end -- groupCount > 0
+            end
+        end
+
+        vm.clusterIconsByIndex = groupedIcons
+        ApplyUBTClusterDragState(viewer, settings)
+        ApplyUBTClusterIconDragHandlers(viewer, settings, clusterCount, groupedIcons)
+        SetViewerMetric(viewer, "lastNumRows", 1)
+        SetViewerMetric(viewer, "iconCount", totalVisibleIcons)
+        if not InCombatLockdown() then viewer:SetSize(2, 2) end
+        return
+    else
+        -- Non-cluster mode: hide all cluster anchors
+        HideAllUBTClusterAnchors(viewer)
+    end
 
     -- Static Grid Mode (per-row size does NOT affect static grid)
     if settings.staticGridMode then

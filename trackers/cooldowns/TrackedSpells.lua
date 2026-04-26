@@ -253,12 +253,12 @@ local function AutoPopulateTrackedSpells()
         if bankEnum == nil then bankEnum = 0 end
         local numLines = C_SpellBook.GetNumSpellBookSkillLines() or 0
         local mainSpecIdx = Enum and Enum.SpellBookSkillLineIndex and Enum.SpellBookSkillLineIndex.MainSpec or 3
+        local classIdx    = Enum and Enum.SpellBookSkillLineIndex and Enum.SpellBookSkillLineIndex.Class    or 2
         for lineIdx = 1, numLines do
             local lineInfo = C_SpellBook.GetSpellBookSkillLineInfo(lineIdx)
             if lineInfo and lineInfo.numSpellBookItems and lineInfo.numSpellBookItems > 0 then
-                -- Only scan the current spec's skill line (skip General, Class, off-specs)
-                local isMainSpec = (lineIdx == mainSpecIdx)
-                if isMainSpec then
+                -- Scan the class line (e.g. "Monk") and the current spec line (e.g. "Brewmaster")
+                if lineIdx == classIdx or lineIdx == mainSpecIdx then
                     for i = 1, lineInfo.numSpellBookItems do
                         local slotIndex = lineInfo.itemIndexOffset + i
                         local ok, info = pcall(C_SpellBook.GetSpellBookItemInfo, slotIndex, bankEnum)
@@ -363,6 +363,47 @@ anchorTex:SetAllPoints(anchorFrame)
 anchorTex:SetColorTexture(0, 0.8, 0, 0.15)
 anchorTex:Hide()
 anchorFrame:Hide()
+
+-- Cursor-anchored group support.
+-- Groups with viewerMode == "cursor" have their anchor tracked here;
+-- a per-frame OnUpdate moves each anchor to GetCursorPosition() + group offset.
+local _cursorGroups = {}  -- array of { anchor, offsetX, offsetY }
+local _cursorFollowFrame = CreateFrame("Frame")
+_cursorFollowFrame:Hide()
+_cursorFollowFrame:SetScript("OnUpdate", function()
+    if #_cursorGroups == 0 then return end
+    local scale = UIParent:GetEffectiveScale()
+    local cx, cy = GetCursorPosition()
+    cx, cy = cx / scale, cy / scale
+    for _, entry in ipairs(_cursorGroups) do
+        if entry.anchor and entry.anchor:IsShown() then
+            entry.anchor:ClearAllPoints()
+            entry.anchor:SetPoint("CENTER", UIParent, "BOTTOMLEFT", cx + entry.offsetX, cy + entry.offsetY)
+        end
+    end
+end)
+
+local function RebuildCursorGroups()
+    wipe(_cursorGroups)
+    local groups = CCM_TrackedSpellsSettings and CCM_TrackedSpellsSettings.groups or {}
+    for gIdx, group in ipairs(groups) do
+        if (group.viewerMode or "standalone") == "cursor" then
+            local anchor = _G["CCM_GroupAnchorFrame"..gIdx]
+            if anchor then
+                _cursorGroups[#_cursorGroups + 1] = {
+                    anchor  = anchor,
+                    offsetX = tonumber(group.cursorOffsetX) or 0,
+                    offsetY = tonumber(group.cursorOffsetY) or 0,
+                }
+            end
+        end
+    end
+    if #_cursorGroups > 0 then
+        _cursorFollowFrame:Show()
+    else
+        _cursorFollowFrame:Hide()
+    end
+end
 
 -- Options panel for tracked spells
 
@@ -538,6 +579,8 @@ function UpdateCustomSpellIcons()
             if ga then ga:Hide() end
         end
         anchorFrame:Hide()
+        wipe(_cursorGroups)
+        _cursorFollowFrame:Hide()
         return
     end
     -- Hide icons out of combat if option is enabled
@@ -551,6 +594,8 @@ function UpdateCustomSpellIcons()
             if ga then ga:Hide() end
         end
         anchorFrame:Hide()
+        wipe(_cursorGroups)
+        _cursorFollowFrame:Hide()
         return
     end
 
@@ -650,17 +695,23 @@ function UpdateCustomSpellIcons()
             border.right:Hide()
         end
         local viewerMode = group.viewerMode or "standalone"
-        if not CCM_TrackedSpellsSettings.groupsMoving then
+        if viewerMode == "cursor" then
+            -- Position is driven each frame by the cursor follow ticker; just show.
+            groupAnchor:Show()
+        elseif not CCM_TrackedSpellsSettings.groupsMoving then
             groupAnchor:ClearAllPoints()
             groupAnchor:SetPoint("CENTER", UIParent, "CENTER", anchorX, anchorY)
-        elseif not groupAnchor._ccmUnlockInitialized then
-            groupAnchor:ClearAllPoints()
-            groupAnchor:SetPoint("CENTER", UIParent, "CENTER", anchorX, anchorY)
-            groupAnchor._ccmUnlockInitialized = true
-        end
-        if viewerMode ~= "standalone" and not CCM_TrackedSpellsSettings.groupsMoving then
-            groupAnchor:Hide()
+            if viewerMode ~= "standalone" then
+                groupAnchor:Hide()
+            else
+                groupAnchor:Show()
+            end
         else
+            if not groupAnchor._ccmUnlockInitialized then
+                groupAnchor:ClearAllPoints()
+                groupAnchor:SetPoint("CENTER", UIParent, "CENTER", anchorX, anchorY)
+                groupAnchor._ccmUnlockInitialized = true
+            end
             groupAnchor:Show()
         end
         -- Show/hide green background and group number based on unlock state
@@ -712,6 +763,8 @@ function UpdateCustomSpellIcons()
                 local spellKey = tostring(id)
                 local spellIconSize = tonumber(spellSizes[spellKey]) or baseIconSize
                 local spellYOffset = tonumber(spellOffsets[spellKey]) or 0
+                local spellXOffsets = group.spellXOffsets or {}
+                local spellXOffset = tonumber(spellXOffsets[spellKey]) or 0
                 frame:SetSize(spellIconSize, spellIconSize)
                 local showCount = true
                 local spellCountCfg = group.spellCountSettings and group.spellCountSettings[spellKey]
@@ -761,10 +814,10 @@ function UpdateCustomSpellIcons()
                         if spellType == "spell" then
                             local chargesInfo = C_Spell and C_Spell.GetSpellCharges and C_Spell.GetSpellCharges(id)
                             if chargesInfo then
-                                -- currentCharges is NOT secret (directly)
+                                -- currentCharges is secret — pass directly to SetText (C-side, taint-safe)
                                 local charges = chargesInfo.currentCharges
-                                if charges ~= nil then
-                                    frame.count:SetText(tostring(charges))
+                                if charges then
+                                    frame.count:SetText(charges)
                                 else
                                     frame.count:SetText("")
                                 end
@@ -773,7 +826,13 @@ function UpdateCustomSpellIcons()
                                     if chargeDurObj then
                                         frame.cooldown:SetCooldownFromDurationObject(chargeDurObj)
                                     else
-                                        frame.cooldown:Clear()
+                                        -- Fallback: some charge spells track recharge via regular cooldown
+                                        local durObj = C_Spell and C_Spell.GetSpellCooldownDuration and C_Spell.GetSpellCooldownDuration(id)
+                                        if durObj then
+                                            frame.cooldown:SetCooldownFromDurationObject(durObj)
+                                        else
+                                            frame.cooldown:Clear()
+                                        end
                                     end
                                 end
                             else
@@ -819,7 +878,13 @@ function UpdateCustomSpellIcons()
                                     if chargeDurObj then
                                         frame.cooldown:SetCooldownFromDurationObject(chargeDurObj)
                                     else
-                                        frame.cooldown:Clear()
+                                        -- Fallback: some charge spells track recharge via regular cooldown
+                                        local durObj = C_Spell and C_Spell.GetSpellCooldownDuration and C_Spell.GetSpellCooldownDuration(id)
+                                        if durObj then
+                                            frame.cooldown:SetCooldownFromDurationObject(durObj)
+                                        else
+                                            frame.cooldown:Clear()
+                                        end
                                     end
                                 else
                                     local durObj = C_Spell and C_Spell.GetSpellCooldownDuration and C_Spell.GetSpellCooldownDuration(id)
@@ -897,6 +962,25 @@ function UpdateCustomSpellIcons()
                 end
 
                 frame:ClearAllPoints()
+                -- Determine if the spell is currently on cooldown (for "only on cooldown" toggle)
+                local spellOnlyOnCD = group.spellOnlyOnCooldown and group.spellOnlyOnCooldown[spellKey]
+                local isOnCooldown = not spellOnlyOnCD  -- if toggle off, treat as always visible
+                if spellOnlyOnCD then
+                    if spellType == "spell" then
+                        -- Active aura counts as "on cooldown"
+                        if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+                            local ad = C_UnitAuras.GetPlayerAuraBySpellID(id)
+                            if ad and ad.duration and ad.duration > 0 then isOnCooldown = true end
+                        end
+                        if not isOnCooldown then
+                            local cdInfo2 = C_Spell and C_Spell.GetSpellCooldown and C_Spell.GetSpellCooldown(id)
+                            if cdInfo2 and cdInfo2.isActive and not cdInfo2.isOnGCD then isOnCooldown = true end
+                        end
+                    elseif spellType == "item" then
+                        local _s, dur, en = GetItemCooldown and GetItemCooldown(id)
+                        if en and dur and dur > 1.5 then isOnCooldown = true end
+                    end
+                end
                 local viewerMode = group.viewerMode or "standalone"
                 if viewerMode == "essential" or viewerMode == "utility" then
                     local sortOrder = tonumber(group.viewerSortOrder) or 0
@@ -911,8 +995,18 @@ function UpdateCustomSpellIcons()
                         end
                         frame._ccmRegisteredViewer = nil
                     end
-                    frame:SetPoint("CENTER", groupAnchor, "CENTER", x, y + spellYOffset)
-                    frame:Show()
+                    frame:SetPoint("CENTER", groupAnchor, "CENTER", x + spellXOffset, y + spellYOffset)
+                    if isOnCooldown then
+                        frame:Show()
+                    else
+                        frame:Hide()
+                    end
+                end
+                -- Desaturate when "only on cooldown" is enabled and spell IS on cooldown
+                if spellOnlyOnCD and isOnCooldown then
+                    frame.texture:SetDesaturated(true)
+                else
+                    frame.texture:SetDesaturated(false)
                 end
                 local countSize = tonumber(spellCountCfg and spellCountCfg.size) or chargeTextSize
                 local countPosition = (spellCountCfg and spellCountCfg.position) or chargePosition
@@ -943,6 +1037,7 @@ function UpdateCustomSpellIcons()
     else
         anchorFrame:Hide()
     end
+    RebuildCursorGroups()
 end
 
 

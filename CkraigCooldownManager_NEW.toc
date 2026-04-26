@@ -4,7 +4,7 @@
 ## Author: Ckraigfriend
 ## Version: 4.0
 ## Category: Unit Frames
-## SavedVariables: MyEssentialBuffTrackerDB,MyUtilityBuffTrackerDB,UtilityIconDuplicatorDB,DYNAMICICONSDB,DYNAMICBARSDB,CooldownChargeDB,CkraigCooldownManagerDB,CCM_Settings,TrinketTrackerDB,PowerPotionSuccessIconDB,CCM_TrackedSpellsDB,CCM_SegmentBarsDB,CCM_DefensiveAuraDB,CCM_EditModeTogglePanelDB,CCM_ResourceBarsDB
+## SavedVariables: MyEssentialBuffTrackerDB,MyUtilityBuffTrackerDB,UtilityIconDuplicatorDB,DYNAMICICONSDB,DYNAMICBARSDB,CooldownChargeDB,CkraigCooldownManagerDB,CCM_Settings,TrinketTrackerDB,PowerPotionSuccessIconDB,CCM_TrackedSpellsDB,CCM_SegmentBarsDB,CCM_DefensiveAuraDB,CCM_EditModeTogglePanelDB,CCM_ResourceBarsDB,MySpellKeybindOverlayDB
 
 ## OptionalDeps: Ace3, LibStub, CallbackHandler-1.0, LibSharedMedia-3.0, LibCustomGlow-1.0
 
@@ -84,9 +84,10 @@ trackers/items/TrinketRacials.lua
 trackers/items/PowerPotionSuccess.lua
 
 # ============================================================
-# Visuals  (glow effects)
+# Visuals  (glow effects, keybind overlays)
 # ============================================================
 visuals/GlowManager.lua
+visuals/SpellKeybindOverlay.lua
 
 # ============================================================
 # UI  (Ace3 options panels, minimap button)
@@ -103,6 +104,7 @@ ui/options/TrackedSpellsOptions.lua
 ui/options/SegmentBarsOptions.lua
 ui/options/ChargeTextColorAceOptions.lua
 ui/options/DefensiveAuraOptions.lua
+ui/options/SpellKeybindOverlayOptions.lua
 ui/minimap/MinimapButton.lua
 ui/EditModeTogglePanel.lua
 ui/reload.lua

@@ -97,6 +97,52 @@ end
 
 
 local LibEditMode = LibStub("LibEditMode", true)
+local LSM = LibStub("LibSharedMedia-3.0", true)
+
+-- Sound state tracking (per item key)
+local trSoundPrevReady   = {}   -- [key] = bool (true = was ready last tick)
+local trSoundLastPlay    = {}   -- [key] = GetTime() of last play (throttle)
+local trSoundMinInterval = 0.75
+
+local function TRResolveSoundPath(soundKey)
+	if not soundKey or soundKey == "" then return nil end
+	if LSM and LSM.Fetch then
+		local ok, path = pcall(LSM.Fetch, LSM, "sound", soundKey, true)
+		if ok and path and path ~= "" then return path end
+	end
+	return soundKey
+end
+
+local function TRSpeakText(text)
+	if not text or text == "" then return false end
+	if not (C_VoiceChat and C_VoiceChat.SpeakText and C_TTSSettings
+		and C_TTSSettings.GetVoiceOptionID and Enum and Enum.TtsVoiceType) then
+		return false
+	end
+	local voiceID = C_TTSSettings.GetVoiceOptionID(Enum.TtsVoiceType.Standard)
+	if not voiceID then return false end
+	local rate   = (C_TTSSettings.GetSpeechRate   and C_TTSSettings.GetSpeechRate())   or 0
+	local volume = (C_TTSSettings.GetSpeechVolume and C_TTSSettings.GetSpeechVolume()) or 100
+	return pcall(C_VoiceChat.SpeakText, voiceID, text, rate, volume, false) and true or false
+end
+
+local function TRPlaySound(key, cfg, labelText, force)
+	if not cfg then return end
+	if not force and not cfg.enabled then return end
+	local now = GetTime and GetTime() or 0
+	local last = trSoundLastPlay[key]
+	if last and (now - last) < trSoundMinInterval then return end
+	trSoundLastPlay[key] = now
+	local output = cfg.output or "sound"
+	if output == "sound" or output == "both" then
+		local path = TRResolveSoundPath(cfg.sound)
+		if path then pcall(PlaySoundFile, path, "Master") end
+	end
+	if output == "tts" or output == "both" then
+		local text = (cfg.ttsText and cfg.ttsText ~= "") and cfg.ttsText or (labelText or key)
+		TRSpeakText(text)
+	end
+end
 
 local CCM_C = CCM.Constants or {}
 local ICON_SIZE = CCM_C.DEFAULT_ICON_SIZE or 40
@@ -135,6 +181,18 @@ local ShowPassiveTrinkets = true
 local Group2ClusterMode = false
 local Group2ClusterIndex = 1
 local Group2SortOrder = 0
+
+-- Count text anchor/offset/size/color per group
+local CountAnchor1 = "BOTTOMRIGHT"
+local CountOffsetX1 = -2
+local CountOffsetY1 = 2
+local CountFontSize1 = 14
+local CountColor1 = { r = 1, g = 1, b = 1, a = 1 }
+local CountAnchor2 = "BOTTOMRIGHT"
+local CountOffsetX2 = -2
+local CountOffsetY2 = 2
+local CountFontSize2 = 14
+local CountColor2 = { r = 1, g = 1, b = 1, a = 1 }
 
 local function NormalizePosition(x, y, defaultX, defaultY)
 	local nx = tonumber(x)
@@ -245,6 +303,16 @@ local function LoadSettings()
 	Group2ClusterMode = data.group2ClusterMode or false
 	Group2ClusterIndex = data.group2ClusterIndex or 1
 	Group2SortOrder = data.group2SortOrder or 0
+	CountAnchor1 = data.countAnchor1 or "BOTTOMRIGHT"
+	CountOffsetX1 = data.countOffsetX1 or -2
+	CountOffsetY1 = data.countOffsetY1 or 2
+	CountFontSize1 = data.countFontSize1 or 14
+	if type(data.countColor1) == "table" then CountColor1 = data.countColor1 else CountColor1 = { r=1, g=1, b=1, a=1 } end
+	CountAnchor2 = data.countAnchor2 or "BOTTOMRIGHT"
+	CountOffsetX2 = data.countOffsetX2 or -2
+	CountOffsetY2 = data.countOffsetY2 or 2
+	CountFontSize2 = data.countFontSize2 or 14
+	if type(data.countColor2) == "table" then CountColor2 = data.countColor2 else CountColor2 = { r=1, g=1, b=1, a=1 } end
 	EnsureIconGroupAssignments()
 end
 
@@ -268,6 +336,26 @@ local function SaveSettings()
 	SetProfileData("group2ClusterMode", Group2ClusterMode)
 	SetProfileData("group2ClusterIndex", Group2ClusterIndex)
 	SetProfileData("group2SortOrder", Group2SortOrder)
+	SetProfileData("countAnchor1", CountAnchor1)
+	SetProfileData("countOffsetX1", CountOffsetX1)
+	SetProfileData("countOffsetY1", CountOffsetY1)
+	SetProfileData("countFontSize1", CountFontSize1)
+	SetProfileData("countColor1", CountColor1)
+	SetProfileData("countAnchor2", CountAnchor2)
+	SetProfileData("countOffsetX2", CountOffsetX2)
+	SetProfileData("countOffsetY2", CountOffsetY2)
+	SetProfileData("countFontSize2", CountFontSize2)
+	SetProfileData("countColor2", CountColor2)
+end
+
+-- Apply count text anchor/offset/size/color to an icon frame
+local function ApplyCountPosition(frame, anchor, offsetX, offsetY, fontSize, color)
+	if not frame or not frame.count then return end
+	frame.count:ClearAllPoints()
+	frame.count:SetPoint(anchor, frame, anchor, offsetX, offsetY)
+	frame.count:SetFont(STANDARD_TEXT_FONT, fontSize or 14, "OUTLINE")
+	local c = color or CountColor1
+	frame.count:SetTextColor(c.r or 1, c.g or 1, c.b or 1, c.a or 1)
 end
 
 
@@ -1094,7 +1182,77 @@ local function FindPlayerRacials()
 	return found
 end
 
+-- Returns true if the given item category key is currently on cooldown
+local function TRIsItemOnCooldown(key)
+	if key == "trinket13" or key == "trinket14" then
+		local slot = key == "trinket13" and 13 or 14
+		local itemID = GetInventoryItemID("player", slot)
+		if not itemID then return false end
+		local start, dur, enable
+		if C_Item and C_Item.GetItemCooldown then
+			start, dur, enable = C_Item.GetItemCooldown(itemID)
+		else
+			start, dur, enable = GetInventoryItemCooldown("player", slot)
+		end
+		return enable and enable ~= 0 and dur and dur > 1.5
+	end
+	if key == "healthstone" then
+		for _, id in ipairs({224464, 5512}) do
+			if GetItemCount and GetItemCount(id, false) > 0 then
+				local start, dur, enable = GetSafeItemCooldown(id)
+				return enable and enable ~= 0 and dur and dur > 1.5
+			end
+		end
+		return false
+	end
+	if key == "racials" then
+		for _, spellID in ipairs(RACIALS) do
+			if IsSpellKnown and IsSpellKnown(spellID) then
+				local cdInfo = C_Spell and C_Spell.GetSpellCooldown and C_Spell.GetSpellCooldown(spellID)
+				if cdInfo and cdInfo.isActive and not cdInfo.isOnGCD then return true end
+			end
+		end
+		return false
+	end
+	local potionList = (key == "power") and POWER_POTIONS or (key == "healing") and HEALING_POTIONS or nil
+	if potionList then
+		for _, id in ipairs(potionList) do
+			if GetItemCount and GetItemCount(id, false) > 0 then
+				local start, dur, enable = GetSafeItemCooldown(id)
+				return enable and enable ~= 0 and dur and dur > 1.5
+			end
+		end
+	end
+	return false
+end
 
+-- Dispatch sound events based on cooldown state transitions
+local function TRDispatchSounds()
+	local data = GetProfileData()
+	local soundData = data and data.itemSounds
+	if type(soundData) ~= "table" then return end
+	local labels = {
+		trinket13 = "Trinket", trinket14 = "Trinket",
+		racials = "Racial", power = "Potion", healing = "Healing Potion",
+		healthstone = "Healthstone",
+	}
+	for key, cfg in pairs(soundData) do
+		if type(cfg) == "table" and cfg.enabled then
+			local isOnCD  = TRIsItemOnCooldown(key)
+			local isReady = not isOnCD
+			local prev    = trSoundPrevReady[key]
+			if prev ~= nil then
+				local mode = cfg.mode or "ready"
+				if (mode == "ready"    or mode == "both") and     isReady and not prev then
+					TRPlaySound(key, cfg, labels[key] or key)
+				elseif (mode == "cooldown" or mode == "both") and not isReady and prev then
+					TRPlaySound(key, cfg, labels[key] or key)
+				end
+			end
+			trSoundPrevReady[key] = isReady
+		end
+	end
+end
 
 function UpdateAllIcons()
 	EnsureSavedPositions()
@@ -1332,6 +1490,7 @@ function UpdateAllIcons()
 					   end
 					   frame.count:SetText("")
 				end
+				ApplyCountPosition(frame, CountAnchor1, CountOffsetX1, CountOffsetY1, CountFontSize1, CountColor1)
 				PositionIcon(frame, i, iconsInRow, row, col, rowOffsetX, anchorFrame)
 				usedFrames = math.max(usedFrames, i)
 			end
@@ -1410,6 +1569,7 @@ function UpdateAllIcons()
 					   end
 					   frame.count:SetText("")
 				   end
+				   ApplyCountPosition(frame, CountAnchor2, CountOffsetX2, CountOffsetY2, CountFontSize2, CountColor2)
 				   -- Essential mode: register with MyEssentialBuffTracker instead of standalone positioning
 				   if Group2ClusterMode and MyEssentialBuffTracker and MyEssentialBuffTracker.RegisterExternalIcon then
 				       frame.Icon = frame.Icon or frame.texture
@@ -1502,6 +1662,7 @@ function UpdateAllIcons()
 					end
 					frame.count:SetText("")
 				end
+				ApplyCountPosition(frame, CountAnchor1, CountOffsetX1, CountOffsetY1, CountFontSize1, CountColor1)
 				PositionIcon(frame, i, iconsInRow, row, col, rowOffsetX, anchorFrame)
 				usedFrames = usedFrames + 1
 			end
@@ -1515,6 +1676,7 @@ function UpdateAllIcons()
 		iconFrames[i]._trinketData = nil
 		iconFrames[i]:Hide()
 	end
+	TRDispatchSounds()
 end
 
 -- Lightweight cooldown-only update: no data rebuild, no repositioning
@@ -1712,11 +1874,60 @@ _G.TRINKETRACIALS.ResetPositions = function()
 	UpdateAllIcons()
 end
 
+-- Expose count text settings
+_G.TRINKETRACIALS.GetCountSettings = function(group)
+	if group == 2 then
+		return CountAnchor2, CountOffsetX2, CountOffsetY2, CountFontSize2
+	end
+	return CountAnchor1, CountOffsetX1, CountOffsetY1, CountFontSize1
+end
+_G.TRINKETRACIALS.SetCountSettings = function(group, anchor, offX, offY, fontSize)
+	if group == 2 then
+		if anchor then CountAnchor2 = anchor end
+		if offX ~= nil then CountOffsetX2 = offX end
+		if offY ~= nil then CountOffsetY2 = offY end
+		if fontSize ~= nil then CountFontSize2 = fontSize end
+		SetProfileData("countAnchor2", CountAnchor2)
+		SetProfileData("countOffsetX2", CountOffsetX2)
+		SetProfileData("countOffsetY2", CountOffsetY2)
+		SetProfileData("countFontSize2", CountFontSize2)
+	else
+		if anchor then CountAnchor1 = anchor end
+		if offX ~= nil then CountOffsetX1 = offX end
+		if offY ~= nil then CountOffsetY1 = offY end
+		if fontSize ~= nil then CountFontSize1 = fontSize end
+		SetProfileData("countAnchor1", CountAnchor1)
+		SetProfileData("countOffsetX1", CountOffsetX1)
+		SetProfileData("countOffsetY1", CountOffsetY1)
+		SetProfileData("countFontSize1", CountFontSize1)
+	end
+	UpdateAllIcons()
+end
+_G.TRINKETRACIALS.SetCountColor = function(group, r, g, b, a)
+	if group == 2 then
+		CountColor2 = { r = r or 1, g = g or 1, b = b or 1, a = a or 1 }
+		SetProfileData("countColor2", CountColor2)
+	else
+		CountColor1 = { r = r or 1, g = g or 1, b = b or 1, a = a or 1 }
+		SetProfileData("countColor1", CountColor1)
+	end
+	UpdateAllIcons()
+end
+_G.TRINKETRACIALS.GetCountColor = function(group)
+	if group == 2 then
+		return CountColor2.r or 1, CountColor2.g or 1, CountColor2.b or 1, CountColor2.a or 1
+	end
+	return CountColor1.r or 1, CountColor1.g or 1, CountColor1.b or 1, CountColor1.a or 1
+end
+
 -- Expose item lists for Ace3 options UI
 _G.TRINKETRACIALS.GetRacials = function() return RACIALS end
 _G.TRINKETRACIALS.GetPowerPotions = function() return POWER_POTIONS end
 _G.TRINKETRACIALS.GetHealingPotions = function() return HEALING_POTIONS end
 _G.TRINKETRACIALS.GetIconGroupAssignments = function() return GetIconGroupAssignments() end
+_G.TRINKETRACIALS.TestSound = function(key, cfg, labelText)
+    TRPlaySound(key, cfg, labelText, true)
+end
 _G.TRINKETRACIALS.SetIconGroupAssignment = function(key, group)
     local assignments = GetIconGroupAssignments()
     assignments[key] = group

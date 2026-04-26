@@ -6,6 +6,81 @@
 -- ============================================================
 
 local CCM = _G.CkraigCooldownManager
+local AceRegistry = LibStub("AceConfigRegistry-3.0")
+local LSM = LibStub("LibSharedMedia-3.0", true)
+
+local trSoundKeyCache        = nil
+local trSoundSearchText      = ""
+local trSoundLsmCallbackReg  = false
+local trSoundShowAll         = true
+local trSoundPage            = 1
+local trSoundPageSize        = 150
+
+local function TRTrimString(s)
+    if type(s) ~= "string" then return "" end
+    return s:match("^%s*(.-)%s*$") or ""
+end
+
+local function TRBuildSoundKeyCache()
+    if trSoundKeyCache then return trSoundKeyCache end
+    local keys = {}
+    if LSM and LSM.HashTable then
+        local tbl = LSM:HashTable("sound")
+        if type(tbl) == "table" then
+            for key in pairs(tbl) do keys[#keys + 1] = tostring(key) end
+        end
+    end
+    table.sort(keys, function(a, b) return a:lower() < b:lower() end)
+    trSoundKeyCache = keys
+    return trSoundKeyCache
+end
+
+local function TRGetSoundValues(currentValue)
+    local values = {}
+    local keys = TRBuildSoundKeyCache()
+    local query = TRTrimString(trSoundSearchText):lower()
+    local hasSearch = (query ~= "")
+
+    if hasSearch then
+        for _, key in ipairs(keys) do
+            if key:lower():find(query, 1, true) then values[key] = key end
+        end
+    elseif trSoundShowAll then
+        local totalKeys = #keys
+        local totalPages = math.max(1, math.ceil(totalKeys / trSoundPageSize))
+        if trSoundPage > totalPages then trSoundPage = totalPages end
+        if trSoundPage < 1 then trSoundPage = 1 end
+        local startIdx = (trSoundPage - 1) * trSoundPageSize + 1
+        local endIdx   = math.min(startIdx + trSoundPageSize - 1, totalKeys)
+        for i = startIdx, endIdx do
+            local key = keys[i]
+            if key then values[key] = key end
+        end
+    else
+        local count = 0
+        for _, key in ipairs(keys) do
+            values[key] = key
+            count = count + 1
+            if count >= 80 then break end
+        end
+    end
+
+    if currentValue and currentValue ~= "" and not values[currentValue] then
+        values[currentValue] = currentValue .. " (selected)"
+    end
+    return values
+end
+
+local function TRRegisterSoundCallback()
+    if trSoundLsmCallbackReg or not (LSM and LSM.RegisterCallback) then return end
+    trSoundLsmCallbackReg = true
+    LSM:RegisterCallback("LibSharedMedia_Registered", function(_, mediaType)
+        if mediaType == "sound" then
+            trSoundKeyCache = nil
+            AceRegistry:NotifyChange("CkraigCooldownManager")
+        end
+    end)
+end
 
 local function GetDB()
     -- Read settings from the module's own profile data store
@@ -144,6 +219,8 @@ local function SetMoveModeSafe(group, enabled)
 end
 
 function CCM.BuildTrinketRacialsOptions()
+    TRRegisterSoundCallback()
+
     CCM.AceOptionsTable.args.trinketRacials = {
         type = "group",
         name = "Tracked Items",
@@ -452,6 +529,233 @@ function CCM.BuildTrinketRacialsOptions()
                 },
             },
             -- ============================
+            -- Count Text tab
+            -- ============================
+            countText = {
+                type = "group",
+                name = "Count Text",
+                order = 5,
+                args = {
+                    desc = {
+                        type = "description",
+                        name = "Configure the anchor point and X/Y offset of the count number on each icon.",
+                        order = 0,
+                        fontSize = "medium",
+                    },
+                    headerGroup1 = {
+                        type = "header",
+                        name = "Group 1",
+                        order = 10,
+                    },
+                    countAnchor1 = {
+                        type = "select",
+                        name = "Anchor Point",
+                        desc = "Which corner/edge of the icon the count number is anchored to.",
+                        order = 11,
+                        values = {
+                            TOPLEFT = "Top Left", TOP = "Top", TOPRIGHT = "Top Right",
+                            LEFT = "Left", CENTER = "Center", RIGHT = "Right",
+                            BOTTOMLEFT = "Bottom Left", BOTTOM = "Bottom", BOTTOMRIGHT = "Bottom Right",
+                        },
+                        sorting = { "TOPLEFT", "TOP", "TOPRIGHT", "LEFT", "CENTER", "RIGHT", "BOTTOMLEFT", "BOTTOM", "BOTTOMRIGHT" },
+                        get = function() local db = GetDB(); return db.countAnchor1 or "BOTTOMRIGHT" end,
+                        set = function(_, val) SetAndRefresh("countAnchor1", val) end,
+                    },
+                    countOffsetX1 = {
+                        type = "range",
+                        name = "X Offset",
+                        order = 12,
+                        min = -50, max = 50, step = 1,
+                        get = function() local db = GetDB(); return db.countOffsetX1 or -2 end,
+                        set = function(_, val) SetAndRefresh("countOffsetX1", val) end,
+                    },
+                    countOffsetY1 = {
+                        type = "range",
+                        name = "Y Offset",
+                        order = 13,
+                        min = -50, max = 50, step = 1,
+                        get = function() local db = GetDB(); return db.countOffsetY1 or 2 end,
+                        set = function(_, val) SetAndRefresh("countOffsetY1", val) end,
+                    },
+                    countFontSize1 = {
+                        type = "range",
+                        name = "Font Size",
+                        order = 14,
+                        min = 6, max = 32, step = 1,
+                        get = function() local db = GetDB(); return db.countFontSize1 or 14 end,
+                        set = function(_, val) SetAndRefresh("countFontSize1", val) end,
+                    },
+                    countColor1 = {
+                        type = "color",
+                        name = "Color",
+                        order = 15,
+                        hasAlpha = true,
+                        get = function()
+                            local db = GetDB()
+                            local c = type(db.countColor1) == "table" and db.countColor1 or {}
+                            return c.r or 1, c.g or 1, c.b or 1, c.a or 1
+                        end,
+                        set = function(_, r, g, b, a)
+                            local c = { r = r, g = g, b = b, a = a }
+                            SetAndRefresh("countColor1", c)
+                        end,
+                    },
+                    headerGroup2 = {
+                        type = "header",
+                        name = "Group 2",
+                        order = 20,
+                        hidden = function() local db = GetDB(); return (db.groupMode or "single") ~= "split" end,
+                    },
+                    countAnchor2 = {
+                        type = "select",
+                        name = "Anchor Point",
+                        desc = "Which corner/edge of the icon the count number is anchored to (Group 2).",
+                        order = 21,
+                        hidden = function() local db = GetDB(); return (db.groupMode or "single") ~= "split" end,
+                        values = {
+                            TOPLEFT = "Top Left", TOP = "Top", TOPRIGHT = "Top Right",
+                            LEFT = "Left", CENTER = "Center", RIGHT = "Right",
+                            BOTTOMLEFT = "Bottom Left", BOTTOM = "Bottom", BOTTOMRIGHT = "Bottom Right",
+                        },
+                        sorting = { "TOPLEFT", "TOP", "TOPRIGHT", "LEFT", "CENTER", "RIGHT", "BOTTOMLEFT", "BOTTOM", "BOTTOMRIGHT" },
+                        get = function() local db = GetDB(); return db.countAnchor2 or "BOTTOMRIGHT" end,
+                        set = function(_, val) SetAndRefresh("countAnchor2", val) end,
+                    },
+                    countOffsetX2 = {
+                        type = "range",
+                        name = "X Offset",
+                        order = 22,
+                        min = -50, max = 50, step = 1,
+                        hidden = function() local db = GetDB(); return (db.groupMode or "single") ~= "split" end,
+                        get = function() local db = GetDB(); return db.countOffsetX2 or -2 end,
+                        set = function(_, val) SetAndRefresh("countOffsetX2", val) end,
+                    },
+                    countOffsetY2 = {
+                        type = "range",
+                        name = "Y Offset",
+                        order = 23,
+                        min = -50, max = 50, step = 1,
+                        hidden = function() local db = GetDB(); return (db.groupMode or "single") ~= "split" end,
+                        get = function() local db = GetDB(); return db.countOffsetY2 or 2 end,
+                        set = function(_, val) SetAndRefresh("countOffsetY2", val) end,
+                    },
+                    countFontSize2 = {
+                        type = "range",
+                        name = "Font Size",
+                        order = 24,
+                        min = 6, max = 32, step = 1,
+                        hidden = function() local db = GetDB(); return (db.groupMode or "single") ~= "split" end,
+                        get = function() local db = GetDB(); return db.countFontSize2 or 14 end,
+                        set = function(_, val) SetAndRefresh("countFontSize2", val) end,
+                    },
+                    countColor2 = {
+                        type = "color",
+                        name = "Color",
+                        order = 25,
+                        hasAlpha = true,
+                        hidden = function() local db = GetDB(); return (db.groupMode or "single") ~= "split" end,
+                        get = function()
+                            local db = GetDB()
+                            local c = type(db.countColor2) == "table" and db.countColor2 or {}
+                            return c.r or 1, c.g or 1, c.b or 1, c.a or 1
+                        end,
+                        set = function(_, r, g, b, a)
+                            local c = { r = r, g = g, b = b, a = a }
+                            SetAndRefresh("countColor2", c)
+                        end,
+                    },
+                },
+            },
+            -- ============================
+            -- Sounds tab
+            -- ============================
+            sounds = {
+                type = "group",
+                name = "Sounds",
+                order = 5,
+                args = {
+                    desc = {
+                        type = "description",
+                        name = "Play a sound or TTS when an item becomes ready or goes on cooldown. Configure per category below.",
+                        order = 0,
+                        fontSize = "medium",
+                        width = "full",
+                    },
+                    trSoundShowAllToggle = {
+                        type = "toggle",
+                        name = "Show Full Sound List",
+                        desc = "Toggle between a quick list (first 80 sounds) and the full paginated SharedMedia list.",
+                        order = 1,
+                        width = 1.0,
+                        get = function() return trSoundShowAll end,
+                        set = function(_, val)
+                            trSoundShowAll = val and true or false
+                            trSoundPage = 1
+                            AceRegistry:NotifyChange("CkraigCooldownManager")
+                        end,
+                    },
+                    trSoundPrevPage = {
+                        type = "execute",
+                        name = "< Prev Page",
+                        order = 2,
+                        width = 0.5,
+                        hidden = function() return not trSoundShowAll or TRTrimString(trSoundSearchText) ~= "" end,
+                        disabled = function() return trSoundPage <= 1 end,
+                        func = function()
+                            trSoundPage = math.max(1, trSoundPage - 1)
+                            AceRegistry:NotifyChange("CkraigCooldownManager")
+                        end,
+                    },
+                    trSoundPageInfo = {
+                        type = "description",
+                        name = function()
+                            local totalKeys = #(TRBuildSoundKeyCache())
+                            local totalPages = math.max(1, math.ceil(totalKeys / trSoundPageSize))
+                            return "  Page " .. trSoundPage .. " / " .. totalPages .. "  (" .. totalKeys .. " sounds)  "
+                        end,
+                        order = 3,
+                        width = 1.0,
+                        hidden = function() return not trSoundShowAll or TRTrimString(trSoundSearchText) ~= "" end,
+                    },
+                    trSoundNextPage = {
+                        type = "execute",
+                        name = "Next Page >",
+                        order = 4,
+                        width = 0.5,
+                        hidden = function() return not trSoundShowAll or TRTrimString(trSoundSearchText) ~= "" end,
+                        disabled = function()
+                            local totalKeys = #(TRBuildSoundKeyCache())
+                            local totalPages = math.max(1, math.ceil(totalKeys / trSoundPageSize))
+                            return trSoundPage >= totalPages
+                        end,
+                        func = function()
+                            local totalKeys = #(TRBuildSoundKeyCache())
+                            local totalPages = math.max(1, math.ceil(totalKeys / trSoundPageSize))
+                            trSoundPage = math.min(totalPages, trSoundPage + 1)
+                            AceRegistry:NotifyChange("CkraigCooldownManager")
+                        end,
+                    },
+                    trSoundSearch = {
+                        type = "input",
+                        name = "Search SharedMedia Sounds",
+                        desc = "Type part of a sound name to filter the dropdown.",
+                        order = 5,
+                        width = "full",
+                        get = function() return trSoundSearchText end,
+                        set = function(_, val)
+                            trSoundSearchText = TRTrimString(val)
+                            AceRegistry:NotifyChange("CkraigCooldownManager")
+                        end,
+                    },
+                    trSoundSearchHelp = {
+                        type = "description",
+                        name = "Tip: Use Search to find sounds instantly. Enable 'Show Full Sound List' to browse all sounds with page controls.",
+                        order = 6,
+                        width = "full",
+                    },
+                },
+            },
+            -- ============================
             -- Tracked Items tab
             -- ============================
             trackedItems = {
@@ -616,5 +920,164 @@ function CCM.BuildTrinketRacialsOptions()
             }
             order = order + 1
         end
+    end
+
+    -- ============================
+    -- Build Sounds tab content
+    -- ============================
+    local soundTab = CCM.AceOptionsTable.args.trinketRacials.args.sounds
+
+    local SOUND_CATEGORIES = {
+        { key = "racials",     label = "Racials",         icon = function() return GetSpellIcon(RACIALS and RACIALS[1] or 0) end },
+        { key = "trinket13",   label = "Trinket Slot 13", icon = function() return GetInventoryItemTexture("player", 13) or 134400 end },
+        { key = "trinket14",   label = "Trinket Slot 14", icon = function() return GetInventoryItemTexture("player", 14) or 134400 end },
+        { key = "power",       label = "Power Potion",    icon = function() return GetItemIcon(POWER_POTIONS and POWER_POTIONS[1] or 0) end },
+        { key = "healing",     label = "Healing Potion",  icon = function() return GetItemIcon(HEALING_POTIONS and HEALING_POTIONS[1] or 0) end },
+        { key = "healthstone", label = "Healthstone",     icon = function() return GetItemIcon(5512) end },
+    }
+
+    local function RACIALS_ref()
+        return _G.TRINKETRACIALS and _G.TRINKETRACIALS.GetRacials and _G.TRINKETRACIALS.GetRacials() or {}
+    end
+    local function POWER_ref()
+        return _G.TRINKETRACIALS and _G.TRINKETRACIALS.GetPowerPotions and _G.TRINKETRACIALS.GetPowerPotions() or {}
+    end
+    local function HEALING_ref()
+        return _G.TRINKETRACIALS and _G.TRINKETRACIALS.GetHealingPotions and _G.TRINKETRACIALS.GetHealingPotions() or {}
+    end
+
+    SOUND_CATEGORIES[1].icon = function()
+        local r = RACIALS_ref(); return (r[1] and GetSpellIcon(r[1])) or 134400
+    end
+    SOUND_CATEGORIES[4].icon = function()
+        local p = POWER_ref(); return (p[1] and GetItemIcon(p[1])) or 134400
+    end
+    SOUND_CATEGORIES[5].icon = function()
+        local h = HEALING_ref(); return (h[1] and GetItemIcon(h[1])) or 134400
+    end
+
+    local sOrder = 10
+    for _, cat in ipairs(SOUND_CATEGORIES) do
+        local capturedKey   = cat.key
+        local capturedLabel = cat.label
+        local capturedIcon  = cat.icon
+
+        soundTab.args["sound_" .. capturedKey] = {
+            type = "group",
+            name = capturedLabel,
+            inline = true,
+            order = sOrder,
+            args = {
+                icon = {
+                    type = "description", name = "", order = 1,
+                    image = function()
+                        local ok, tex = pcall(capturedIcon)
+                        return (ok and tex) and tex or 134400, 24, 24
+                    end,
+                    width = 0.15,
+                },
+                enabled = {
+                    type = "toggle", name = "Enabled", order = 2, width = 0.4,
+                    get = function()
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        local cfg = db.itemSounds[capturedKey]
+                        return type(cfg) == "table" and cfg.enabled == true
+                    end,
+                    set = function(_, v)
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        db.itemSounds[capturedKey] = db.itemSounds[capturedKey] or {}
+                        db.itemSounds[capturedKey].enabled = v and true or false
+                        SetAndRefresh("itemSounds", db.itemSounds)
+                    end,
+                },
+                mode = {
+                    type = "select", name = "Trigger", order = 3, width = 0.75,
+                    values = { ready = "On Ready", cooldown = "On Cooldown", both = "Both" },
+                    get = function()
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        local cfg = db.itemSounds[capturedKey]
+                        return (type(cfg) == "table" and cfg.mode) or "ready"
+                    end,
+                    set = function(_, v)
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        db.itemSounds[capturedKey] = db.itemSounds[capturedKey] or {}
+                        db.itemSounds[capturedKey].mode = v
+                        SetAndRefresh("itemSounds", db.itemSounds)
+                    end,
+                },
+                output = {
+                    type = "select", name = "Output", order = 4, width = 0.7,
+                    values = { sound = "Sound", tts = "TTS", both = "Sound + TTS" },
+                    get = function()
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        local cfg = db.itemSounds[capturedKey]
+                        return (type(cfg) == "table" and cfg.output) or "sound"
+                    end,
+                    set = function(_, v)
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        db.itemSounds[capturedKey] = db.itemSounds[capturedKey] or {}
+                        db.itemSounds[capturedKey].output = v
+                        SetAndRefresh("itemSounds", db.itemSounds)
+                    end,
+                },
+                sound = {
+                    type = "select", name = "Sound", order = 5, width = 1.2,
+                    hidden = function()
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        local cfg = db.itemSounds[capturedKey]
+                        return (type(cfg) == "table" and cfg.output) == "tts"
+                    end,
+                    values = function()
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        local cfg = db.itemSounds[capturedKey]
+                        return TRGetSoundValues(type(cfg) == "table" and cfg.sound or "")
+                    end,
+                    get = function()
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        local cfg = db.itemSounds[capturedKey]
+                        return (type(cfg) == "table" and cfg.sound) or ""
+                    end,
+                    set = function(_, v)
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        db.itemSounds[capturedKey] = db.itemSounds[capturedKey] or {}
+                        db.itemSounds[capturedKey].sound = v
+                        SetAndRefresh("itemSounds", db.itemSounds)
+                    end,
+                },
+                ttsText = {
+                    type = "input", name = "TTS Text", order = 6, width = 1.2,
+                    desc = "Text to speak. Leave blank to use '" .. capturedLabel .. "'.",
+                    hidden = function()
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        local cfg = db.itemSounds[capturedKey]
+                        return (type(cfg) == "table" and cfg.output) == "sound"
+                    end,
+                    get = function()
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        local cfg = db.itemSounds[capturedKey]
+                        return (type(cfg) == "table" and cfg.ttsText) or ""
+                    end,
+                    set = function(_, v)
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        db.itemSounds[capturedKey] = db.itemSounds[capturedKey] or {}
+                        db.itemSounds[capturedKey].ttsText = tostring(v or "")
+                        SetAndRefresh("itemSounds", db.itemSounds)
+                    end,
+                },
+                test = {
+                    type = "execute", name = "Test", order = 7, width = 0.4,
+                    func = function()
+                        local db = GetDB(); db.itemSounds = db.itemSounds or {}
+                        local cfg = db.itemSounds[capturedKey]
+                        if type(cfg) == "table" then
+                            if _G.TRINKETRACIALS and _G.TRINKETRACIALS.TestSound then
+                                _G.TRINKETRACIALS.TestSound(capturedKey, cfg, capturedLabel)
+                            end
+                        end
+                    end,
+                },
+            },
+        }
+        sOrder = sOrder + 1
     end
 end

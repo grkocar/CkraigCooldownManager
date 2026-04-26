@@ -316,6 +316,8 @@ local DEFAULTS = {
     clusterCenterIcons = true,
     clusterDuplicates = {},
     iconDragUnlock = false,
+    clusterFreePositionModes = {},
+    clusterIconFreePositions = {},
     -- Per-spell aura→cooldown override (show actual spell CD instead of buff timer)
     cooldownOverrideSpells = {},
 }
@@ -665,6 +667,8 @@ local function EnsureDB()
     if settings.clusterCenterIcons == nil then settings.clusterCenterIcons = DEFAULTS.clusterCenterIcons end
     if settings.clusterDuplicates == nil then settings.clusterDuplicates = {} end
     if settings.iconDragUnlock == nil then settings.iconDragUnlock = false end
+    if settings.clusterFreePositionModes == nil then settings.clusterFreePositionModes = {} end
+    if settings.clusterIconFreePositions == nil then settings.clusterIconFreePositions = {} end
     if settings.cooldownOverrideSpells == nil then settings.cooldownOverrideSpells = {} end
 end
 
@@ -2153,6 +2157,90 @@ local _ebt_dragState = {
     sourceCluster = nil,
 }
 
+-- Free-position mode: right-click an icon to select it, then use arrow keys to nudge it
+local _ebt_freePosSelected = nil
+local _ebt_freePosViewer   = nil
+local _ebt_freePosKeyFrame = nil
+
+local function EBTFreePosDeselect()
+    if _ebt_freePosSelected then
+        local icon = _ebt_freePosSelected
+        if icon._ebtSelectHighlight then icon._ebtSelectHighlight:Hide() end
+        _ebt_freePosSelected = nil
+        _ebt_freePosViewer   = nil
+    end
+    if _ebt_freePosKeyFrame then
+        _ebt_freePosKeyFrame:EnableKeyboard(false)
+    end
+end
+
+local function EBTFreePosNudge(dx, dy)
+    local icon = _ebt_freePosSelected
+    if not icon then return end
+    local ci = icon._ebtDragCluster
+    local iconKey = GetEssentialIconKey(icon)
+    if not ci or not iconKey then return end
+    local keyStr = tostring(iconKey)
+    local s = MyEssentialBuffTracker:GetSettings()
+    if not s then return end
+    s.clusterIconFreePositions = s.clusterIconFreePositions or {}
+    s.clusterIconFreePositions[ci] = s.clusterIconFreePositions[ci] or {}
+    local pos = s.clusterIconFreePositions[ci][keyStr] or {x=0, y=0}
+    local newX = (pos.x or 0) + dx
+    local newY = (pos.y or 0) + dy
+    s.clusterIconFreePositions[ci][keyStr] = {x=newX, y=newY}
+    if _ebt_freePosViewer then
+        local vm = GetViewerMeta(_ebt_freePosViewer)
+        local anchor = vm.clusterAnchors and vm.clusterAnchors[ci]
+        if anchor then
+            icon:ClearAllPoints()
+            icon:SetPoint("CENTER", anchor, "CENTER", newX, newY)
+        end
+    end
+end
+
+local function EBTFreePosSelect(icon, viewer)
+    EBTFreePosDeselect()
+    _ebt_freePosSelected = icon
+    _ebt_freePosViewer   = viewer
+    -- Yellow highlight overlay
+    if not icon._ebtSelectHighlight then
+        local hl = icon:CreateTexture(nil, "OVERLAY", nil, 7)
+        hl:SetAllPoints()
+        hl:SetColorTexture(1, 0.9, 0, 0.4)
+        icon._ebtSelectHighlight = hl
+    end
+    icon._ebtSelectHighlight:Show()
+    -- Build key capture frame once
+    if not _ebt_freePosKeyFrame then
+        local f = CreateFrame("Frame", nil, UIParent)
+        f:SetAllPoints(UIParent)
+        f:SetFrameStrata("TOOLTIP")
+        f:EnableMouse(false)
+        f:EnableKeyboard(false)
+        f:SetScript("OnKeyDown", function(self, key)
+            if not _ebt_freePosSelected then
+                self:EnableKeyboard(false)
+                return
+            end
+            if key == "ESCAPE" then
+                self:SetPropagateKeyboardInput(false)
+                EBTFreePosDeselect()
+                return
+            end
+            local step = IsShiftKeyDown() and 10 or 1
+            if     key == "UP"    then self:SetPropagateKeyboardInput(false); EBTFreePosNudge(0,  step)
+            elseif key == "DOWN"  then self:SetPropagateKeyboardInput(false); EBTFreePosNudge(0, -step)
+            elseif key == "LEFT"  then self:SetPropagateKeyboardInput(false); EBTFreePosNudge(-step, 0)
+            elseif key == "RIGHT" then self:SetPropagateKeyboardInput(false); EBTFreePosNudge( step, 0)
+            else   self:SetPropagateKeyboardInput(true)
+            end
+        end)
+        _ebt_freePosKeyFrame = f
+    end
+    _ebt_freePosKeyFrame:EnableKeyboard(true)
+end
+
 local function RemoveKeyFromEBTOrderList(orderList, key)
     if type(orderList) ~= "table" then return end
     local normalized = tostring(key)
@@ -2241,11 +2329,28 @@ local function SetupEBTClusterIconDrag(icon, viewer, clusterIndex)
         if InCombatLockdown() then return end
         local s = MyEssentialBuffTracker:GetSettings()
         if not s or not s.clusterUnlocked then return end
+        local ci = self._ebtDragCluster or clusterIndex
 
         _ebt_dragState.draggingIcon = self
-        _ebt_dragState.sourceCluster = self._ebtDragCluster or clusterIndex
+        _ebt_dragState.sourceCluster = ci
         self:StartMoving()
         self:SetAlpha(0.6)
+    end)
+
+    -- Right-click in free-position mode: select icon for arrow-key nudging
+    icon:SetScript("OnMouseUp", function(self, button)
+        if button ~= "RightButton" then return end
+        if InCombatLockdown() then return end
+        local s = MyEssentialBuffTracker:GetSettings()
+        if not s or not s.clusterUnlocked then return end
+        local ci = self._ebtDragCluster or clusterIndex
+        if not (s.clusterFreePositionModes and s.clusterFreePositionModes[ci]) then return end
+        -- Toggle: right-click selected icon again to deselect
+        if _ebt_freePosSelected == self then
+            EBTFreePosDeselect()
+        else
+            EBTFreePosSelect(self, viewer)
+        end
     end)
 
     icon:SetScript("OnDragStop", function(self)
@@ -2267,6 +2372,28 @@ local function SetupEBTClusterIconDrag(icon, viewer, clusterIndex)
         local keyStr = tostring(iconKey)
         local sourceCluster = tonumber(_ebt_dragState.sourceCluster) or 1
         local clusterCount = math.max(1, math.min(MAX_EBT_CLUSTER_GROUPS, SafeNumber(s.clusterCount, DEFAULTS.clusterCount) or DEFAULTS.clusterCount))
+
+        -- Free position mode: save offset from cluster anchor, re-anchor directly (no layout pass)
+        if s.clusterFreePositionModes and s.clusterFreePositionModes[sourceCluster] then
+            local vm = GetViewerMeta(viewer)
+            local anchor = vm.clusterAnchors and vm.clusterAnchors[sourceCluster]
+            if anchor then
+                local ix, iy = self:GetCenter()
+                local ax, ay = anchor:GetCenter()
+                if ix and iy and ax and ay then
+                    local offsetX = ix - ax
+                    local offsetY = iy - ay
+                    s.clusterIconFreePositions = s.clusterIconFreePositions or {}
+                    s.clusterIconFreePositions[sourceCluster] = s.clusterIconFreePositions[sourceCluster] or {}
+                    s.clusterIconFreePositions[sourceCluster][keyStr] = { x = offsetX, y = offsetY }
+                    self:ClearAllPoints()
+                    self:SetPoint("CENTER", anchor, "CENTER", offsetX, offsetY)
+                end
+            end
+            _ebt_dragState.draggingIcon = nil
+            _ebt_dragState.sourceCluster = nil
+            return
+        end
 
         local uiScale = UIParent and UIParent:GetEffectiveScale() or 1
         local mx, my = GetCursorPosition()
@@ -2803,6 +2930,28 @@ function MyEssentialIconViewers:ApplyViewerLayout(viewer)
                 local anchorHeight = anchor:GetHeight() or 120
 
                 if groupCount > 0 then
+                    -- Free position mode: place each icon at its saved position relative to anchor center
+                    local freeMode = settings.clusterFreePositionModes and settings.clusterFreePositionModes[groupIndex]
+                    if freeMode then
+                        local savedPos = (settings.clusterIconFreePositions and settings.clusterIconFreePositions[groupIndex]) or {}
+                        for idx, icon in ipairs(groupIcons) do
+                            icon:SetSize(clusterIconSize, clusterIconSize)
+                            icon:ClearAllPoints()
+                            local iconKey = GetEssentialIconKey(icon)
+                            local keyStr = iconKey and tostring(iconKey) or ("_idx_" .. idx)
+                            local pos = savedPos[keyStr]
+                            if pos then
+                                icon:SetPoint("CENTER", anchor, "CENTER", pos.x or 0, pos.y or 0)
+                            else
+                                -- Fallback grid until user drags icon into place
+                                local col = (idx - 1) % 3
+                                local row_i = math.floor((idx - 1) / 3)
+                                icon:SetPoint("CENTER", anchor, "CENTER",
+                                    (col - 1) * (clusterIconSize + spacing),
+                                    -row_i * (clusterIconSize + spacing))
+                            end
+                        end
+                    else
                     local iconPlacements = {}
                     local maxPlacement = groupCount
                     if followSampleSlots then
@@ -2910,8 +3059,9 @@ function MyEssentialIconViewers:ApplyViewerLayout(viewer)
                                 icon:SetPoint("CENTER", anchor, "BOTTOMLEFT", x, y)
                             end
                         end
-                    end
-                end
+                    end -- for loop (normal layout)
+                    end -- if freeMode else end
+                end -- if groupCount > 0
             end
         end
 
